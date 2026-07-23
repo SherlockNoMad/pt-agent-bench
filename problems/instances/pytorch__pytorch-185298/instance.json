@@ -54,7 +54,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-08-20T19:44:20Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-02T20:05:50Z",
   "resolution_days": 286.0,
   "hints_text": "[albanD \u00b7 2025-09-15]\nChanging the eager op is unlikely the be a good idea given that it would be BC-breaking.\n\n[cleonard530 \u00b7 2025-11-25]\nI can take a look at this and will raise a PR if I am able to allow min_val > max_val when exporting.\n\n[albanD \u00b7 2025-12-04]\nMoving the discussion here.\nChanging the behavior of either torch.nn.functional.hardtanh or torch.ops.aten.hardtanh is most likely a no-go due to BC as mentioned above.\nI don't expect we can \"fix\" that.\n\nI think the problem here is more a problem with \"export\" that doesn't behave correctly wrt to eager.",

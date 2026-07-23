@@ -48,7 +48,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-06-26T08:34:27Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-05-20T05:05:30Z",
   "resolution_days": 327.9,
   "hints_text": "[spnooyseed \u00b7 2025-06-27]\nIs anyone working on this issue?\n\n[jansel \u00b7 2025-06-28]\n@jamesjwu can you answer this question?\n\n[bdhirsh \u00b7 2025-07-08]\nFrom James: this is not supported, but numpy operations are generally stateless so this shouldn't be hard to support\n\n[spnooyseed \u00b7 2025-07-10]\n@bdhirsh Thank you for your reply. Could you let me know when this will be fully supported? Alternatively, could you provide a solution so that I can fix this bug in my own project?\n\nMy biggest concern is that in this caching system, if the autograd cache fails to support this behavior of numpy, it will cause the autograd cache to become invalid, ultimately leading to a deterioration in the overall compilation caching effect.",

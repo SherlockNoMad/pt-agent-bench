@@ -55,7 +55,6 @@
     "vllm-compile"
   ],
   "issue_created_at": "2025-08-21T00:15:23Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-01T05:24:42Z",
   "resolution_days": 284.2,
   "hints_text": "",

@@ -49,7 +49,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-12-09T11:16:07Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-05-24T23:48:59Z",
   "resolution_days": 166.5,
   "hints_text": "[i3hz \u00b7 2025-12-10]\nThe argument `options` is not really being used anywhere . Even with eager execution we're kinda ignoring the extra kwargs \n`W1210 05:04:35.566000 534 torch/_dynamo/backends/debugging.py:56] [2/0] eager backend ignoring extra kwargs {'options': {'trace.enabled': True}}` \n```python\n@register_backend\ndef eager(\n    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any\n) -> Callable[..., Any]:\n    if kwargs:\n        log.warning(\"eager backend ignoring extra kwargs %s\", kwargs)\n    return gm.forward\n```\n\nBut the `__call__` method of `CudagraphsBackend` doesn't have the `**kwargs` or the check . \n\nShould that be added to the `__call__` method too? If that's the expected fix I'd love to submit a PR .\n\n[jikechao \u00b7 2025-12-10]\n@i3hz Thanks for your response. It seems that the argument `options` will be used in `inductor`.  Hence, throwing a warning message like `eager` could be better.\n\n[i3hz \u00b7 2025-12-11]\n@jikechao  alright I'll submit a PR for it then .",

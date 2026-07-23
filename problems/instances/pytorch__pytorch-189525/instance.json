@@ -53,7 +53,6 @@
     "triaged"
   ],
   "issue_created_at": "2026-06-25T13:11:46Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-07-18T16:25:46Z",
   "resolution_days": 23.1,
   "hints_text": "[ydwu4 \u00b7 2026-06-25]\ncc @bohnstingl",

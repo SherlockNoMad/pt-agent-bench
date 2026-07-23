@@ -13,7 +13,7 @@ import config
 REPO_GH="pytorch/pytorch"
 CANON=["instance_id","repo","base_commit","problem_statement","patch","test_patch",
        "FAIL_TO_PASS","PASS_TO_PASS","version"]
-NEW_ORDER=CANON+["issue_labels","issue_created_at","pr_merged_at","fix_commit_at","resolution_days",
+NEW_ORDER=CANON+["issue_labels","issue_created_at","fix_commit_at","resolution_days",
     "hints_text","issue_url","pr_url","issue_numbers","pull_number",
     "fix_files","test_files","f2p_count","p2p_count","patch_size_loc"]
 
@@ -49,7 +49,7 @@ def enrich(inst):
     hints="\n\n".join(f"[{u} · {t[:10]}]\n{b}".strip() for t,u,b in comments)
     prd=gh(f"repos/{REPO_GH}/pulls/{pr}") if pr else None
     icreated_min=min(icreated) if icreated else None
-    pr_merged=prd.get("merged_at") if prd else None   # usually null: PyTorch lands via ghstack
+    # (no pr_merged_at: PyTorch lands via ghstack, GitHub merged_at is always null)
     # resolution = fix-commit landing time - issue open time (ghstack-safe)
     res_days=None
     if icreated_min and fix_at:
@@ -57,7 +57,6 @@ def enrich(inst):
     inst.update(
         issue_labels=sorted(labels),
         issue_created_at=icreated_min,
-        pr_merged_at=pr_merged,
         fix_commit_at=inst.get("created_at"),
         resolution_days=res_days,
         hints_text=hints,

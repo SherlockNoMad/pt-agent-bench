@@ -56,7 +56,6 @@
     "triaged"
   ],
   "issue_created_at": "2026-04-30T09:50:08Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-06T11:51:44Z",
   "resolution_days": 37.1,
   "hints_text": "[zou3519 \u00b7 2026-04-30]\n> In 2.12, the plan is to flip error_on_custom_op_aliasing to True by default (i.e., everywhere, not only in CI). At that point user-land will see the same hard error.\n\nWho made this plan? I don't think we can do this. It is too BC-breaking\n\n[huydhn \u00b7 2026-04-30]\nThere are 2 things:\n\n1. The code itself says this is coming in 2.12 https://github.com/pytorch/pytorch/pull/173844/changes#diff-4a416d03113a56b6d2efdb2f85ec4a3f342f9d23b21f5c82fe778a0b37cb6e97R97\n2. This causes a runtime error only on CI given `error_on_custom_op_aliasing = bool(os.getenv(\"CI\"))`, which is confusing\n\nI don't know what this is about, so I can't comment on the plan here. But if this is not what we plan to do in 2.12 or any future versions, we just need to fix the warning to make it clearer and maybe make it not enforced in CI be default, the same as how users observe it.  It's weird to run CI test in one way while expecting the code to work the other way.\n\n[zou3519 \u00b7 2026-04-30]\nhttps://github.com/pytorch/pytorch/pull/182063\n\n[huydhn \u00b7 2026-04-30]\nAnd the corresponding PR to switch CI to warning instead of runtime error https://github.com/pytorch/pytorch/pull/182068\n\n[zou3519 \u00b7 2026-05-29]\nI think error in our ci is fine, we just need to selectively disable it for e.g. vllm",

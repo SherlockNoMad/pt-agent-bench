@@ -51,7 +51,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-12-23T19:41:48Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-03T05:07:02Z",
   "resolution_days": 161.4,
   "hints_text": "[vadimkantorov \u00b7 2025-12-23]\nI was also hitting an issue on not allowed setting requires_grad in fullgraph (because it' s the meaning of `nn.Parameter` - to create a leaf with requires_grad):\n- https://github.com/pytorch/pytorch/issues/170487\n\n[malfet \u00b7 2026-01-12]\nRe-added pt2\n\n[dsashidh \u00b7 2026-01-12]\nLooking at this",

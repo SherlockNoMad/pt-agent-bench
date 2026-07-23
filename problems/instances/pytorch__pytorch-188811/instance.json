@@ -47,7 +47,6 @@
     "oncall: pt2"
   ],
   "issue_created_at": "2026-07-02T14:47:26Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-07-06T06:58:14Z",
   "resolution_days": 3.7,
   "hints_text": "",

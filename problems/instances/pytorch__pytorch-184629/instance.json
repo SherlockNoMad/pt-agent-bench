@@ -58,7 +58,6 @@
     "triaged"
   ],
   "issue_created_at": "2026-05-16T01:36:57Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-05-24T22:16:08Z",
   "resolution_days": 8.9,
   "hints_text": "[anijain2305 \u00b7 2026-05-18]\nAlso fails with \"eager\" backend\n```\nimport torch\n\ndef fn(x, t1, t2):\n    y = x.clone()\n    y.addcmul_(t1, t2, value=0.5)\n    return y.sum()\n\nx = torch.randn(4, 4, device=\"cuda\", requires_grad=True)\nt1 = torch.randn(4, 4, device=\"cuda\", requires_grad=True)\nt2 = torch.randn(4, 4, device=\"cuda\", requires_grad=True)\n\n# Eager: OK\nfn(x, t1, t2).backward()\nprint(\"Eager OK\")\n\n# Compiled: CRASH\ntorch._dynamo.reset()\ntorch.compile(fn, backend=\"eager\")(x, t1, t2).backward()\n# RuntimeError: Trying to backward through prims.fma.default\n# but no autograd formula was registered.\n```\n\ncc @mlazos\n\n[khushi-411 \u00b7 2026-05-19]\nHi, I'm working on this issue! Will share a PR soon.\n\n[krastogi-in \u00b7 2026-05-20]\n@anijain2305 / @mlazos  , The failure on eager is due to dynamo decomposition of addcmul or addcdiv is because inductor_prims is used for fma calculation. Here the intention was to not have graphbreak due to .item() called when the 0-d tensor value is supplied ( which should have been scalar). We can do register inductor_prims_fma for grad or define new ops as prims_fma which have similar operation as of indcutor this will maintain consistency. Please do let me know your opinion on this.",

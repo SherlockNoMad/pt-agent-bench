@@ -54,7 +54,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-03-26T22:54:52Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-25T20:30:42Z",
   "resolution_days": 455.9,
   "hints_text": "[angelayi \u00b7 2025-03-31]\nhttps://github.com/pytorch/pytorch/pull/150241\n\n[SS-JIA \u00b7 2025-04-02]\nUnfortunately on my PR the refs decomposition is failing a correctness check. Tagged the original implementation author to see if he would know why. We will likely need to resolve the test failure before adding the decomp to the core table.",

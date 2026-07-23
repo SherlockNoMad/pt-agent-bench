@@ -52,7 +52,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-08-01T18:26:58Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-05T18:01:21Z",
   "resolution_days": 308.0,
   "hints_text": "[zou3519 \u00b7 2025-08-01]\n> Also, it's really easy for users to use torch.empty_like(x). I've encountered at least one user who used torch.empty_like(x), and doesn't know why the meta implementation is failing with numerical issues.\n\nI'm confused, are you saying we shouldn't use empty_like, or is it that users need to learn more nuance between empty/new_empty/empty_like?\n\n[yushangdi \u00b7 2025-08-01]\n> > Also, it's really easy for users to use torch.empty_like(x). I've encountered at least one user who used torch.empty_like(x), and doesn't know why the meta implementation is failing with numerical issues.\n> \n> I'm confused, are you saying we shouldn't use empty_like, or is it that users need to learn more nuance between empty/new_empty/empty_like?\n\n@zou3519 I meant the latter, it's easy for users to make this mistake.",

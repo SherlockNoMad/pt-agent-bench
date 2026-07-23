@@ -37,7 +37,6 @@
     "triaged"
   ],
   "issue_created_at": "2025-07-09T02:23:18Z",
-  "pr_merged_at": null,
   "fix_commit_at": "2026-06-02T17:42:32Z",
   "resolution_days": 328.6,
   "hints_text": "[zou3519 \u00b7 2025-07-09]\nseems reasonable",
