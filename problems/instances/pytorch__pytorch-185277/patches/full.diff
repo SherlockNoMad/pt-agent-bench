@@ -1,0 +1,100 @@
+diff --git a/test/dynamo/test_functions.py b/test/dynamo/test_functions.py
+index 1196f2f6b0fa2..0916c4c44cd70 100644
+--- a/test/dynamo/test_functions.py
++++ b/test/dynamo/test_functions.py
+@@ -2627,6 +2627,60 @@ def test_distributed_is_available(x):
+         else:
+             return x - 1
+ 
++    def test_backend_availability_predicates(self):
++        def is_mps_available():
++            return (
++                hasattr(torch.backends, "mps")
++                and torch.backends.mps.is_available()
++                and torch.backends.mps.is_built()
++            )
++
++        def is_mtia_available():
++            return hasattr(torch, "mtia") and torch.mtia.is_available()
++
++        def clear_device_cache_like(x):
++            if is_mps_available():
++                return x + 1
++            elif torch.mps.is_available():
++                return x + 2
++            elif is_mtia_available():
++                return x + 3
++            elif torch.cuda.is_available():
++                return x + 4
++            elif torch.xpu.is_available():
++                return x + 5
++            elif torch.accelerator.is_available():
++                return x + 6
++            return x - 1
++
++        x = torch.randn(3)
++        opt_fn = torch.compile(clear_device_cache_like, backend="eager", fullgraph=True)
++        self.assertEqual(opt_fn(x), clear_device_cache_like(x))
++
++        def top_level_predicates(x):
++            if torch.mps.is_available():
++                x = x + 7
++            else:
++                x = x - 7
++            if torch.mtia.is_available():
++                x = x + 11
++            else:
++                x = x - 11
++            return x
++
++        opt_fn = torch.compile(top_level_predicates, backend="eager", fullgraph=True)
++        self.assertEqual(opt_fn(x), top_level_predicates(x))
++
++    def test_backend_mps_is_built(self):
++        def fn(x):
++            if torch.backends.mps.is_built():
++                return x + 1
++            return x - 1
++
++        x = torch.randn(3)
++        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
++        self.assertEqual(opt_fn(x), fn(x))
++
+     @unittest.skipIf(
+         not torch.distributed.is_available(), "requires distributed package"
+     )
+diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py
+index db6190298be4c..cf6c958a5fd23 100644
+--- a/torch/_dynamo/trace_rules.py
++++ b/torch/_dynamo/trace_rules.py
+@@ -187,6 +187,8 @@
+     "torch._utils._maybe_view_chunk_cat": UserFunctionVariable,
+     "torch.fx._symbolic_trace.is_fx_tracing": TorchInGraphFunctionVariable,
+     "torch.fx._symbolic_trace.is_fx_symbolic_tracing": TorchInGraphFunctionVariable,
++    "torch.mps.is_available": TorchInGraphFunctionVariable,
++    "torch.mtia.is_available": TorchInGraphFunctionVariable,
+     "torch._dynamo.external_utils.is_compiling": TorchInGraphFunctionVariable,
+     "torch._dynamo.utils._disable_side_effect_safety_checks_for_current_subtracer": UserFunctionVariable,
+     "torch.compiler.is_compiling": TorchInGraphFunctionVariable,
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index a62851e7aba07..0e79d3a8e5cca 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -190,6 +190,8 @@
+     torch._C._get_cublas_allow_tf32,
+     torch._C._is_any_autocast_enabled,
+     torch.accelerator.is_available,
++    torch.backends.mps.is_available.__wrapped__,  # type: ignore[attr-defined]
++    torch.backends.mps.is_built,
+     torch.cuda.get_device_properties,
+     torch.cuda.is_available,
+     torch.distributed.is_available,
+@@ -205,6 +207,8 @@
+     torch.promote_types,
+     torch._C._get_privateuse1_backend_name,
+     torch.autograd._is_checkpoint_valid,
++    torch.mps.is_available,
++    torch.mtia.is_available,
+     torch.xpu.get_device_properties,
+     torch.xpu.is_available,
+ ] + constant_fold_functions_need_guards

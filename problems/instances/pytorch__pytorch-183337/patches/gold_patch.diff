@@ -1,0 +1,12 @@
+diff --git a/torch/_dynamo/variables/torch_function.py b/torch/_dynamo/variables/torch_function.py
+index 3a75188cae62a..bf91ae2316f6f 100644
+--- a/torch/_dynamo/variables/torch_function.py
++++ b/torch/_dynamo/variables/torch_function.py
+@@ -611,6 +611,7 @@ def from_tensor_var(
+         # TensorWithTFOverrideVariable. In eager, this is just a type change.
+         import torch
+ 
++        tensor_var = tensor_var.realize()
+         # This simulates shallow-copying the tensor object.
+         kwargs = dict(tensor_var.__dict__)
+         input_tensor_type = kwargs.pop("class_type")

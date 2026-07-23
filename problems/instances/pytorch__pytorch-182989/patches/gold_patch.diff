@@ -1,0 +1,35 @@
+diff --git a/torch/_dynamo/backends/cudagraphs.py b/torch/_dynamo/backends/cudagraphs.py
+index 7559b9558816b..b6af7eaa74210 100644
+--- a/torch/_dynamo/backends/cudagraphs.py
++++ b/torch/_dynamo/backends/cudagraphs.py
+@@ -22,6 +22,7 @@
+ """
+ 
+ import functools
++import logging
+ from collections import defaultdict
+ from collections.abc import Callable, Sequence
+ from typing import Any
+@@ -51,6 +52,9 @@
+ from .registry import register_backend
+ 
+ 
++log = logging.getLogger(__name__)
++
++
+ def find_input_mutations(g: torch.fx.Graph) -> set[int]:
+     def meta_fk(meta: dict[str, Any]) -> Any:
+         return meta["val"] if "val" in meta else meta["fake_result"]
+@@ -251,7 +255,11 @@ def reset() -> None:
+         reset_cudagraph_trees()
+ 
+     @staticmethod
+-    def __call__(model: torch.fx.GraphModule, inputs: Sequence[Any]) -> Any:
++    def __call__(
++        model: torch.fx.GraphModule, inputs: Sequence[Any], **kwargs: Any
++    ) -> Any:
++        if kwargs:
++            log.warning("cudagraphs backend ignoring extra kwargs %s", kwargs)
+         return cudagraphs(model, inputs)
+ 
+ 

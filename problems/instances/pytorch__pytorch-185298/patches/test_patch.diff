@@ -1,0 +1,42 @@
+diff --git a/test/export/test_export.py b/test/export/test_export.py
+index 0e9bdbfe48bdc..2bbe98936ef22 100755
+--- a/test/export/test_export.py
++++ b/test/export/test_export.py
+@@ -1473,6 +1473,23 @@ def forward(self, x):
+         inp = torch.randint(0, 8, (5,), dtype=torch.int64)
+         self.assertTrue(torch.allclose(ep.module()(inp), M()(inp)))
+ 
++    def test_export_allows_aten_hardtanh_with_inverted_bounds(self):
++        class M(torch.nn.Module):
++            def forward(self, x):
++                return torch.ops.aten.hardtanh(x, min_val=2, max_val=0)
++
++        model = M()
++        x = torch.randn(3)
++        ep = export(model, (x,), strict=True)
++        self.assertEqual(ep.module()(x), model(x))
++        self.assertTrue(
++            any(
++                node.op == "call_function"
++                and node.target == torch.ops.aten.hardtanh.default
++                for node in ep.graph_module.graph.nodes
++            )
++        )
++
+     def test_symint_output(self):
+         class Foo(torch.nn.Module):
+             def forward(self, x):
+diff --git a/test/test_ops.py b/test/test_ops.py
+index d494061e20490..580ae09ed2077 100644
+--- a/test/test_ops.py
++++ b/test/test_ops.py
+@@ -2560,6 +2560,9 @@ class TestRefsOpsInfo(TestCase):
+         "_refs.nn.functional.poisson_nll_loss",
+         "_refs.nn.functional.softmax",
+         "_refs.nn.functional.softmin",
++        # The frontend ref validates min_val <= max_val, but aten.hardtanh
++        # preserves native ATen semantics and allows inverted bounds.
++        "_refs.nn.functional.hardtanh",
+         "_refs.positive",
+         "_refs.ravel",
+         "_refs.reshape",

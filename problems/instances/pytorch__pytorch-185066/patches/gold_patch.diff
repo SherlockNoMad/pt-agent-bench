@@ -1,0 +1,55 @@
+diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py
+index 189980d6abc6d..c30795302f628 100644
+--- a/torch/_dynamo/trace_rules.py
++++ b/torch/_dynamo/trace_rules.py
+@@ -250,6 +250,8 @@
+     "torch.cuda.set_device": SkipFunctionVariable,
+     "torch.cuda.current_device": TorchInGraphFunctionVariable,
+     "torch.autograd.grad": TorchInGraphFunctionVariable,
++    "torch.autograd.grad_mode._enter_inference_mode": TorchInGraphFunctionVariable,
++    "torch.autograd.grad_mode._exit_inference_mode": TorchInGraphFunctionVariable,
+     "torch.autograd.backward": SkipFunctionVariable,
+     "torch.distributions.constraints.is_dependent": SkipFunctionVariable,
+     "torch.jit.isinstance": SkipFunctionVariable,
+@@ -2535,8 +2537,6 @@
+         "torch.autograd.functional.jvp",
+         "torch.autograd.functional.vhp",
+         "torch.autograd.functional.vjp",
+-        "torch.autograd.grad_mode._enter_inference_mode",
+-        "torch.autograd.grad_mode._exit_inference_mode",
+         "torch.autograd.graph._get_sid",
+         "torch.autograd.graph._get_tid",
+         "torch.autograd.graph.allow_mutation_on_saved_tensors",
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index f410767cbcf83..aabbbd2631af4 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -912,6 +912,7 @@ def _register(handler: Callable[..., Any]) -> Callable[..., Any]:
+         from . import (
+             ConstantVariable,
+             GradModeVariable,
++            InferenceModeVariable,
+             StreamContextVariable,
+             SymNodeVariable,
+             TensorVariable,
+@@ -1189,6 +1190,20 @@ def handle_is_grad_enabled(
+             install_guard(GradModeVariable._guards_singleton)
+             return VariableTracker.build(tx, torch.is_grad_enabled())
+ 
++        @register(torch.autograd.grad_mode._enter_inference_mode)
++        def handle_enter_inference_mode(
++            self, tx: "InstructionTranslatorBase", mode: VariableTracker
++        ) -> InferenceModeVariable:
++            ctx = InferenceModeVariable.create(tx, mode.as_python_constant())
++            ctx.enter(tx)
++            return ctx
++
++        @register(torch.autograd.grad_mode._exit_inference_mode)
++        def handle_exit_inference_mode(
++            self, tx: "InstructionTranslatorBase", mode: InferenceModeVariable
++        ) -> VariableTracker:
++            return mode.exit(tx)
++
+         @register(torch.use_deterministic_algorithms)
+         def handle_use_deterministic_algorithms(
+             self,

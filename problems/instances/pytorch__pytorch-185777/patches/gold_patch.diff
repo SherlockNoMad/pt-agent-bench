@@ -1,0 +1,36 @@
+diff --git a/torch/__init__.py b/torch/__init__.py
+index ea1ea3d6d079f..c174e8e1ef112 100644
+--- a/torch/__init__.py
++++ b/torch/__init__.py
+@@ -1716,6 +1716,12 @@ def _check_with(
+     message: _Callable[[], str],
+ ):
+     if not isinstance(cond, (builtins.bool, SymBool)):
++        if isinstance(cond, torch.Tensor):
++            raise TypeError(
++                "cond must be a bool, but got a Tensor. "
++                "For tensor conditions, use torch._check_tensor_all() "
++                "to assert that all elements are true."
++            )
+         raise TypeError(f"cond must be a bool, but got {type(cond)}")
+ 
+     from torch.fx.experimental.symbolic_shapes import expect_true
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index 34277df783839..6da3675bb722d 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -2461,6 +2461,14 @@ def check_impl(
+                     f"{self.value.__name__}() missing 1 required positional argument: 'cond'",
+                 )
+ 
++            if predicate_vt.is_tensor():
++                raise_type_error(
++                    tx,
++                    "cond must be a bool, but got a Tensor. "
++                    "For tensor conditions, use torch._check_tensor_all() "
++                    "to assert that all elements are true.",
++                )
++
+             message_eager = None
+             message_graph_proxy = None
+             if message_vt is not None:

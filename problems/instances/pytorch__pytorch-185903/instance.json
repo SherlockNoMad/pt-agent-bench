@@ -1,0 +1,42 @@
+{
+  "instance_id": "pytorch__pytorch-185903",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "149907"
+  ],
+  "pull_number": 185903,
+  "base_commit": "1b6442e463d53f7c7d5f714d00e1aacc7caf8531",
+  "problem_statement": "[ued][chatTTS][dynamo] Graph break on x.transpose_\n\n### \ud83d\udc1b Describe the bug\n\nThis might be a fundamental graph break. So, we might need to suggest a workaround.\n\n<img width=\"1109\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/57050dff-7c69-4c84-91ec-87f45c3be4de\" />\n\nFull tlparse - [https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpZEpwwY/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000#[18/0]](https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpZEpwwY/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000#%5B18/0%5D)\n\nUser doc - [docs.google.com/document/d/19cVx0Vhr0042Rfrw2-Xc7Y2OtS8bwc-NUXRG5ACcd2Q/edit?tab=t.0](https://docs.google.com/document/d/19cVx0Vhr0042Rfrw2-Xc7Y2OtS8bwc-NUXRG5ACcd2Q/edit?tab=t.0)\n\n### Error logs\n\n_No response_\n\n### Versions\n\nNA\n\ncc @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @chenyang78 @kadeng @amjames",
+  "patch": "diff --git a/torch/_dynamo/variables/misc.py b/torch/_dynamo/variables/misc.py\nindex 29d58854b8aca..557ea69dabdfc 100644\n--- a/torch/_dynamo/variables/misc.py\n+++ b/torch/_dynamo/variables/misc.py\n@@ -761,9 +761,15 @@ class DelayGraphBreakVariable(UnknownVariable):\n     Used to insert a dummy variable in the stack to do the graph break at CALL_FUNCTION.\n     \"\"\"\n \n-    def __init__(self, msg: str | None = None, **kwargs: Any) -> None:\n+    def __init__(\n+        self,\n+        msg: str | None = None,\n+        hints: list[str] | None = None,\n+        **kwargs: Any,\n+    ) -> None:\n         super().__init__(**kwargs)\n         self.msg = msg\n+        self.hints = hints or []\n \n     def call_function(\n         self,\n@@ -777,7 +783,7 @@ def call_function(\n             context=f\"source: {self.source}\",\n             explanation=\"Dynamo determined that a graph break should occur \"\n             f\"when calling `{name}`. Reason: {self.msg}\",\n-            hints=[],\n+            hints=self.hints,\n         )\n \n \ndiff --git a/torch/_dynamo/variables/tensor.py b/torch/_dynamo/variables/tensor.py\nindex 36ad8adab35a7..4028363edbce0 100644\n--- a/torch/_dynamo/variables/tensor.py\n+++ b/torch/_dynamo/variables/tensor.py\n@@ -693,6 +693,14 @@ def var_getattr(\n                 return variables.misc.DelayGraphBreakVariable(\n                     source=AttrSource(self.source, name),\n                     msg=\"Getting an inplace view on a graph input is not supported\",\n+                    hints=[\n+                        \"Avoid mutating a graph input's tensor metadata with in-place view ops. \"\n+                        \"If the mutation is only needed inside the compiled region, replace the in-place call \"\n+                        \"with an out-of-place view, for example `x = x.transpose(1, 2)` instead of \"\n+                        \"`x.transpose_(1, 2)`.\",\n+                        \"If you need to mutate the input tensor's metadata, move the in-place view call outside \"\n+                        \"`torch.compile`.\",\n+                    ],\n                 )\n \n         # For attributes (not methods) that were not caught in the special handling above,\n",
+  "test_patch": "diff --git a/test/dynamo/test_error_messages.py b/test/dynamo/test_error_messages.py\nindex 7ccc89c7fdf06..08e7da8cccb6f 100644\n--- a/test/dynamo/test_error_messages.py\n+++ b/test/dynamo/test_error_messages.py\n@@ -45,6 +45,31 @@ def __exit__(self, exc_type, exc_value, traceback):\n \n \n class ErrorMessagesTest(LoggingTestCase):\n+    def test_inplace_view_on_graph_input_hint(self):\n+        def fn(x):\n+            x.transpose_(1, 2)\n+            return x\n+\n+        self.assertExpectedInlineMunged(\n+            Unsupported,\n+            lambda: torch.compile(fn, backend=\"eager\", fullgraph=True)(\n+                torch.randn(2, 3, 4)\n+            ),\n+            \"\"\"\\\n+Unsupported function call (delayed)\n+  Explanation: Dynamo determined that a graph break should occur when calling `L['x'].transpose_`. Reason: Getting an inplace view on a graph input is not supported\n+  Hint: Avoid mutating a graph input's tensor metadata with in-place view ops. If the mutation is only needed inside the compiled region, replace the in-place call with an out-of-place view, for example `x = x.transpose(1, 2)` instead of `x.transpose_(1, 2)`.\n+  Hint: If you need to mutate the input tensor's metadata, move the in-place view call outside `torch.compile`.\n+\n+  Developer debug context: source: AttrSource(base=LocalSource(local_name='x', is_input=True, dynamism=None, is_derefed_cell_contents=False), member='transpose_')\n+\n+ For more details about this graph break, please visit: https://meta-pytorch.github.io/compile-graph-break-site/gb/gb0148.html\n+\n+from user code:\n+   File \"test_error_messages.py\", line N, in fn\n+    x.transpose_(1, 2)\"\"\",\n+        )\n+\n     def test_dynamic_shape_operator_no_meta_kernel(self):\n         def fn():\n             return torch.linalg.lstsq(torch.rand(10, 10), torch.rand(10, 10))\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_inplace_view_on_graph_input_hint"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_backend_fake_tensor_exc",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_cond_with_graph_break_shows_hop_context",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_data_dependent_branching_bool_tensor_hints",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_data_dependent_branching_fullgraph",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_data_dependent_operator2",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_dict_items_input",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_disable_message",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_dynamo_graph_break_fn",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_dynamo_graph_break_fn_with_msg",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_faketensor_nyi",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_fx_node_error_bad_user_code",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_generic_ctx_mgr_graph_break_fullgraph_true",
+    "test/dynamo/test_error_messages.py::ErrorMessagesTest::test_graph_break_in_buggy_resume_prologue"
+  ],
+  "test_files": [
+    "test/dynamo/test_error_messages.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/variables/misc.py",
+    "torch/_dynamo/variables/tensor.py"
+  ],
+  "created_at": "2026-06-02T07:26:51Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

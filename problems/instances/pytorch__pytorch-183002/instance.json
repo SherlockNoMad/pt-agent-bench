@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-183002",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "149468"
+  ],
+  "pull_number": 183002,
+  "base_commit": "da41a4c61a71c9f7d2a0b9c7d8e883ed5b5f6cdd",
+  "problem_statement": "torch.library.opcheck doesn't check strides for CPU Tensors\n\nRepro:\n```py\nimport torch\nfrom torchvision.transforms.functional import to_pil_image, pil_to_tensor\nimport PIL\n\ndef crop(pic, box):\n    img = to_pil_image(pic.cpu())\n    cropped_img = img.crop(box)\n    return pil_to_tensor(cropped_img).to(pic.device) / 255.\n\nimg = torch.ones(3, 64, 64)\nimg *= torch.linspace(0, 1, steps=64) * torch.linspace(0, 1, steps=64).unsqueeze(-1)\n\ncropped_img = crop(img, (10, 10, 50, 50))\n\ndef f(img):\n    return crop(img, (10, 10, 50, 50))\n\ncropped_img = f(img)\nprint(img.shape, img.stride())\nprint(cropped_img.shape, cropped_img.stride())\n\nfrom typing import Sequence\n\n@torch.library.custom_op(\"mylib::crop\", mutates_args=())\ndef crop(pic: torch.Tensor, box: Sequence[int]) -> torch.Tensor:\n    img = to_pil_image(pic.cpu())\n    cropped_img = img.crop(box)\n    result = (pil_to_tensor(cropped_img) / 255.).to(pic.device, pic.dtype)\n    return result\n\n@crop.register_fake\ndef _(pic, box):\n    channels = pic.shape[0]\n    x0, y0, x1, y1 = box\n    # result = pic.new_empty(y1 - y0, x1 - x0, channels).permute(2, 0, 1)\n    result = pic.new_empty(channels, y1 - y0, x1 - x0)\n    return result\n\nresult = torch.library.opcheck(crop, (img, (10, 10, 50, 50)))\nprint(result)\n```\n\ncc @ezyang @gchanan @kadeng @msaroufim @janeyx99 @anjali411 @bdhirsh @penguinwu @bobrenjc93 @aorenste @malfet @xmfan @chauhang",
+  "patch": "diff --git a/torch/_prims_common/__init__.py b/torch/_prims_common/__init__.py\nindex 5e07931cfe257..3f216ec8b8140 100644\n--- a/torch/_prims_common/__init__.py\n+++ b/torch/_prims_common/__init__.py\n@@ -185,7 +185,7 @@ def compare_tensor_meta(\n     # Stride checking is currently disabled, see https://github.com/pytorch/pytorch/issues/78050\n     if check_strides:\n         same_strides, idx = check_significant_strides(\n-            a, b, allow_rhs_unbacked=allow_rhs_unbacked\n+            a, b, only_cuda=False, allow_rhs_unbacked=allow_rhs_unbacked\n         )\n         if not same_strides:\n             msg = f\"Stride mismatch! Strides are {a.stride()} and {b.stride()} (mismatched at {idx})!\"\n",
+  "test_patch": "diff --git a/test/test_custom_ops.py b/test/test_custom_ops.py\nindex 33f3f65f862fd..501f3e5cc76e2 100644\n--- a/test/test_custom_ops.py\n+++ b/test/test_custom_ops.py\n@@ -223,6 +223,21 @@ def foo_meta(x):\n         ):\n             torch.library.opcheck(op, (x,), {})\n \n+    # https://github.com/pytorch/pytorch/issues/149468\n+    def test_opcheck_cpu_stride_mismatch(self, device):\n+        @torch.library.custom_op(\"test::stride_mismatch\", mutates_args=())\n+        def stride_mismatch(x: torch.Tensor) -> torch.Tensor:\n+            return x.clone().permute(2, 0, 1)\n+\n+        @stride_mismatch.register_fake\n+        def _(x):\n+            c, h, w = x.shape[2], x.shape[0], x.shape[1]\n+            return x.new_empty(c, h, w)\n+\n+        x = torch.randn(4, 4, 3, device=device)\n+        with self.assertRaisesRegex(optests.OpCheckError, \"Stride mismatch\"):\n+            torch.library.opcheck(stride_mismatch, (x,))\n+\n     # https://github.com/pytorch/pytorch/issues/142410\n     def test_opcheck_unbacked_stride(self, device):\n         @torch.library.custom_op(\"test::f\", mutates_args=[])\n",
+  "FAIL_TO_PASS": [
+    "test/test_custom_ops.py::TestCustomOpTestingCPU::test_opcheck_cpu_stride_mismatch_cpu"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_custom_ops.py::TestCustomOp::test_abstract_impl_on_existing_op",
+    "test/test_custom_ops.py::TestCustomOp::test_abstract_impl_on_existing_op_with_CompositeExplicitAutograd",
+    "test/test_custom_ops.py::TestCustomOp::test_abstract_impl_on_existing_op_with_CompositeImplicitAutograd",
+    "test/test_custom_ops.py::TestCustomOp::test_abstract_impl_on_existing_op_with_meta",
+    "test/test_custom_ops.py::TestCustomOp::test_autogen_aten_ops_are_pt2_compliant",
+    "test/test_custom_ops.py::TestCustomOp::test_autograd_function_backed_op",
+    "test/test_custom_ops.py::TestCustomOp::test_autograd_notimplemented",
+    "test/test_custom_ops.py::TestCustomOp::test_autograd_notimplemented_gradmode",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_dict_grad_for_nontensor",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_dict_invalid_keys",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_dict_requires_keys_for_input_optional_tensors",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_dict_requires_keys_for_input_tensors",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_grads_are_tensor_or_none",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op_CompositeImplicitAutograd",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op_incorrect_schema_mutable",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op_incorrect_schema_no_output",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op_incorrect_schema_views",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op_with_key_key_Autograd",
+    "test/test_custom_ops.py::TestCustomOp::test_backward_impl_on_existing_op_with_key_key_AutogradCPU"
+  ],
+  "test_files": [
+    "test/test_custom_ops.py"
+  ],
+  "fix_files": [
+    "torch/_prims_common/__init__.py"
+  ],
+  "created_at": "2026-05-08T23:19:03Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": true
+  }
+}

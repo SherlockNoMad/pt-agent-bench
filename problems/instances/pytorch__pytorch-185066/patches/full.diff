@@ -1,0 +1,98 @@
+diff --git a/test/dynamo/test_ctx_manager.py b/test/dynamo/test_ctx_manager.py
+index 7f06699c4a7eb..526d592036ac0 100644
+--- a/test/dynamo/test_ctx_manager.py
++++ b/test/dynamo/test_ctx_manager.py
+@@ -836,6 +836,38 @@ def forward(self, L_L_x_: "f32[3, 3]", L_L_y_: "f32[3, 3]"):
+ """,
+         )
+ 
++    def test_retrace_inference_mode(self):
++        # Recompile trick doesn't work with dynamic shapes
++        if check_dynamic_shape_capture():
++            return
++
++        def f(x):
++            with torch.inference_mode():
++                y = x + 1
++            return y
++
++        x = torch.randn(2, 2)
++        eager = EagerAndRecordGraphs()
++        opt_f = torch.compile(f, backend=eager, fullgraph=True)
++        out = f(x)
++        opt_out = opt_f(x)
++        self.assertEqual(out, opt_out)
++        self.assertFalse(torch.is_inference_mode_enabled())
++
++        first_graph = normalize_gm(eager.graphs[0].print_readable(False))
++        self.assertIn(
++            "torch.autograd.grad_mode._enter_inference_mode(True)", first_graph
++        )
++        self.assertIn("torch.autograd.grad_mode._exit_inference_mode", first_graph)
++
++        d = {}
++        exec(first_graph, globals(), d)
++        eager = EagerAndRecordGraphs()
++        retraced = torch.compile(d["GraphModule"], backend=eager, fullgraph=True)
++        retraced_out = retraced()(x)[0]
++        self.assertEqual(out, retraced_out)
++        self.assertFalse(torch.is_inference_mode_enabled())
++
+     @parametrize(
+         "Ctx",
+         [CustomizedCtxManagerWithGraphBreak, customized_ctx_manager_with_graph_break],
+diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py
+index 189980d6abc6d..c30795302f628 100644
+--- a/torch/_dynamo/trace_rules.py
++++ b/torch/_dynamo/trace_rules.py
+@@ -250,6 +250,8 @@
+     "torch.cuda.set_device": SkipFunctionVariable,
+     "torch.cuda.current_device": TorchInGraphFunctionVariable,
+     "torch.autograd.grad": TorchInGraphFunctionVariable,
++    "torch.autograd.grad_mode._enter_inference_mode": TorchInGraphFunctionVariable,
++    "torch.autograd.grad_mode._exit_inference_mode": TorchInGraphFunctionVariable,
+     "torch.autograd.backward": SkipFunctionVariable,
+     "torch.distributions.constraints.is_dependent": SkipFunctionVariable,
+     "torch.jit.isinstance": SkipFunctionVariable,
+@@ -2535,8 +2537,6 @@
+         "torch.autograd.functional.jvp",
+         "torch.autograd.functional.vhp",
+         "torch.autograd.functional.vjp",
+-        "torch.autograd.grad_mode._enter_inference_mode",
+-        "torch.autograd.grad_mode._exit_inference_mode",
+         "torch.autograd.graph._get_sid",
+         "torch.autograd.graph._get_tid",
+         "torch.autograd.graph.allow_mutation_on_saved_tensors",
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index f410767cbcf83..aabbbd2631af4 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -912,6 +912,7 @@ def _register(handler: Callable[..., Any]) -> Callable[..., Any]:
+         from . import (
+             ConstantVariable,
+             GradModeVariable,
++            InferenceModeVariable,
+             StreamContextVariable,
+             SymNodeVariable,
+             TensorVariable,
+@@ -1189,6 +1190,20 @@ def handle_is_grad_enabled(
+             install_guard(GradModeVariable._guards_singleton)
+             return VariableTracker.build(tx, torch.is_grad_enabled())
+ 
++        @register(torch.autograd.grad_mode._enter_inference_mode)
++        def handle_enter_inference_mode(
++            self, tx: "InstructionTranslatorBase", mode: VariableTracker
++        ) -> InferenceModeVariable:
++            ctx = InferenceModeVariable.create(tx, mode.as_python_constant())
++            ctx.enter(tx)
++            return ctx
++
++        @register(torch.autograd.grad_mode._exit_inference_mode)
++        def handle_exit_inference_mode(
++            self, tx: "InstructionTranslatorBase", mode: InferenceModeVariable
++        ) -> VariableTracker:
++            return mode.exit(tx)
++
+         @register(torch.use_deterministic_algorithms)
+         def handle_use_deterministic_algorithms(
+             self,

@@ -1,0 +1,109 @@
+diff --git a/test/export/test_draft_export.py b/test/export/test_draft_export.py
+index fefd35ad99ead..bd2920566b63d 100644
+--- a/test/export/test_draft_export.py
++++ b/test/export/test_draft_export.py
+@@ -9,7 +9,7 @@
+ from torch._dynamo.exc import UserError, UserErrorType
+ from torch._subclasses.fake_tensor import FakeTensorMode
+ from torch.export import Dim, draft_export, export
+-from torch.export._draft_export import FailureType
++from torch.export._draft_export import DraftExportReport, FailureReport, FailureType
+ from torch.fx.experimental.symbolic_shapes import ShapeEnv
+ from torch.testing import FileCheck
+ from torch.testing._internal.common_utils import IS_WINDOWS, run_tests, TestCase
+@@ -34,6 +34,34 @@ def setUp(self):
+     def tearDown(self):
+         return
+ 
++    def test_report_warning_color_is_readable_on_light_background(self):
++        report = DraftExportReport(
++            [
++                FailureReport(
++                    FailureType.MISSING_FAKE_KERNEL,
++                    {"op": "mylib.foo.default"},
++                )
++            ],
++            {},
++            {},
++            {},
++        )
++
++        rendered = str(report)
++        self.assertIn("\033[31m", rendered)
++        self.assertNotIn("\033[93m", rendered)
++        self.assertLess(
++            rendered.index("\033[0m"),
++            rendered.index("1. Missing fake kernel."),
++        )
++
++    def test_report_success_color_is_readable_on_light_background(self):
++        report = DraftExportReport([], {}, {}, {})
++
++        rendered = str(report)
++        self.assertIn("\033[32m", rendered)
++        self.assertNotIn("\033[92m", rendered)
++
+     def test_retry_on_constraint_violation_uses_dim_auto(self):
+         class M(torch.nn.Module):
+             def forward(self, x):
+diff --git a/torch/export/_draft_export.py b/torch/export/_draft_export.py
+index c3fb1cd6d1de3..6c2c9f59f70b0 100644
+--- a/torch/export/_draft_export.py
++++ b/torch/export/_draft_export.py
+@@ -29,6 +29,15 @@
+ log = logging.getLogger(__name__)
+ 
+ 
++_DRAFT_EXPORT_WARNING_COLOR = "\033[31m"
++_DRAFT_EXPORT_SUCCESS_COLOR = "\033[32m"
++_DRAFT_EXPORT_END_COLOR = "\033[0m"
++
++
++def _format_colored(text: str, color: str) -> str:
++    return f"{color}{text}{_DRAFT_EXPORT_END_COLOR}"
++
++
+ class FailureType(IntEnum):
+     MISSING_FAKE_KERNEL = 1
+     DATA_DEPENDENT_ERROR = 2
+@@ -178,29 +187,31 @@ def __repr__(self) -> str:
+         return f"DraftExportReport({self.failures})"
+ 
+     def __str__(self) -> str:
+-        WARNING_COLOR = "\033[93m"
+-        GREEN_COLOR = "\033[92m"
+-        END_COLOR = "\033[0m"
+-
+         if self.successful():
+-            return f"""{GREEN_COLOR}
++            return _format_colored(
++                """
+ ##############################################################################################
+ Congratulations: No issues are found during export, and it was able to soundly produce a graph.
+ You can now change back to torch.export.export()
+ ##############################################################################################
+-{END_COLOR}"""
++""",
++                _DRAFT_EXPORT_SUCCESS_COLOR,
++            )
+ 
+-        error = f"""{WARNING_COLOR}
++        error = _format_colored(
++            f"""
+ ###################################################################################################
+ WARNING: {len(self.failures)} issue(s) found during export, and it was not able to soundly produce a graph.
+ Please follow the instructions to fix the errors.
+ ###################################################################################################
+ 
+-"""
++""",
++            _DRAFT_EXPORT_WARNING_COLOR,
++        )
++        error += "\n"
+ 
+         for i, failure in enumerate(self.failures):
+             error += f"{i + 1}. {failure.print(self.str_to_filename)}\n"
+-        error += END_COLOR
+         return error
+ 
+     def apply_suggested_fixes(self) -> None:

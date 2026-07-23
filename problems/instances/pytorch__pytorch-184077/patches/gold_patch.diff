@@ -1,0 +1,66 @@
+diff --git a/torch/_dynamo/debug_utils.py b/torch/_dynamo/debug_utils.py
+index d9fcceb981cc8..a912a2dbf8b97 100644
+--- a/torch/_dynamo/debug_utils.py
++++ b/torch/_dynamo/debug_utils.py
+@@ -297,15 +297,22 @@ def generate_env_vars_string(*, stable_output: bool = False) -> str:
+ 
+     allow_list = ["TORCH", "DYNAMO", "INDUCTOR", "TRITON"]
+     skip_list = ["TRITON_LIBDEVICE_PATH", "TRITON_PTXAS_PATH", "TRITON_LIBCUDA_PATH"]
++    repro_env_vars = ["TORCHDYNAMO_REPRO_AFTER", "TORCHDYNAMO_REPRO_LEVEL"]
+ 
+     def filter(key: str) -> bool:
+-        return any(string in key for string in allow_list) and key not in skip_list
++        return (
++            any(string in key for string in allow_list)
++            and key not in skip_list
++            and key not in repro_env_vars
++        )
+ 
+     config_lines = [
+         f"""os.environ['{key}'] = '{value.replace("'", '"')}'"""
+         for key, value in os.environ.items()
+         if filter(key)
+     ]
++    # Repro scripts should not recursively generate more repro scripts when run.
++    config_lines.extend(f"os.environ.pop('{key}', None)" for key in repro_env_vars)
+     config_string = "\n".join(config_lines)
+     return normalize_path_separator(f"""\
+ import os
+diff --git a/torch/_dynamo/repro/after_aot.py b/torch/_dynamo/repro/after_aot.py
+index 8242416de7ab6..aa8adf74a6ddb 100644
+--- a/torch/_dynamo/repro/after_aot.py
++++ b/torch/_dynamo/repro/after_aot.py
+@@ -1258,19 +1258,20 @@ def repro_minify(options: Any, mod: nn.Module, load_args: Any) -> None:
+     else:
+         module_fails = ACCURACY_FAILS[options.accuracy]
+ 
+-    minifier(
+-        mod,
+-        args,
+-        module_fails=functools.partial(module_fails, check_str=options.check_str),
+-        dump_state=functools.partial(
+-            dump_compiler_graph_state, compiler_name=compiler_name
+-        ),
+-        save_dir=options.save_dir,
+-        offload_to_disk=options.offload_to_disk,
+-        skip_offload=options.skip_saving_eager_intermediates,
+-        skip_sanity=options.skip_sanity,
+-        max_granularity=options.max_granularity,
+-    )
++    with config.patch(repro_after=None):
++        minifier(
++            mod,
++            args,
++            module_fails=functools.partial(module_fails, check_str=options.check_str),
++            dump_state=functools.partial(
++                dump_compiler_graph_state, compiler_name=compiler_name
++            ),
++            save_dir=options.save_dir,
++            offload_to_disk=options.offload_to_disk,
++            skip_offload=options.skip_saving_eager_intermediates,
++            skip_sanity=options.skip_sanity,
++            max_granularity=options.max_granularity,
++        )
+ 
+ 
+ def repro_analyze(options: Any, mod: nn.Module, load_args: Any) -> None:

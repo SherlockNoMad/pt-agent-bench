@@ -1,0 +1,41 @@
+{
+  "instance_id": "pytorch__pytorch-190287",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "190286"
+  ],
+  "pull_number": 190287,
+  "base_commit": "2f40e483fd262663529f7b6fc7e9dfdf830dccc1",
+  "problem_statement": "FlopCounterMode prevents the frame from ever being compiled again\n\ntlparse on the following shows that nothing was compiled. What is going on is:\n\nDynamo skips compilation for a frame when a TorchDispatchMode is active.\nThen, it permanently skips it for the code object, even when the code is\ncalled not under a TorchDispatchMode. The permanent skip thing is useful\nas a caching thing for things that should actually be permanently\nskipped (like if the function is in skipfiles), but it shouldn't apply\nto code being run under a TorchDispatchMode.\n\n```py\nimport torch\nfrom torch.utils.flop_counter import FlopCounterMode\n\nSTEPS = 100\n\n\ndef inside_workload(x, weight):\n    x = x @ weight\n    for _ in range(25):\n        x = torch.sin(x) + 0.01 * x\n    return x\n\n\ndef time_ms(fn, x, weight):\n    start = torch.cuda.Event(enable_timing=True)\n    end = torch.cuda.Event(enable_timing=True)\n    start.record()\n    for _ in range(STEPS):\n        fn(x, weight)\n    end.record()\n    end.synchronize()\n    return start.elapsed_time(end) / STEPS\n\n\ndef main():\n    if not torch.cuda.is_available():\n        raise RuntimeError(\"This reproduction requires CUDA\")\n\n    x = torch.randn(8192, 256, device=\"cuda\", dtype=torch.bfloat16)\n    weight = torch.randn(256, 256, device=\"cuda\", dtype=torch.bfloat16)\n\n    with FlopCounterMode(display=False):\n        compiled_inside = torch.compile(inside_workload, fullgraph=False)\n        compiled_inside(x, weight)  # compilation skipped due to FlopCounterMode\n\n    for _ in range(5):\n        # seems like Dynamo permanently turned compilation off\n        compiled_inside(x, weight)\n\nif __name__ == \"__main__\":\n    main()\n```\n\ncc @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @kadeng @amjames @jataylo @azahed98",
+  "patch": "diff --git a/torch/_dynamo/convert_frame.py b/torch/_dynamo/convert_frame.py\nindex 444eb80fd120a..14e6026eba0a8 100644\n--- a/torch/_dynamo/convert_frame.py\n+++ b/torch/_dynamo/convert_frame.py\n@@ -2570,6 +2570,7 @@ def __call__(\n                 and not getattr(self._torchdynamo_orig_backend, \"_export\", False)\n             )\n         ):\n+            apply_to_code = True\n             if has_started_execution:\n                 skip_reason = \"frame has already started executing\"\n             elif is_skipfile:\n@@ -2581,7 +2582,13 @@ def __call__(\n                     \"non-infra torch dispatch mode present, this is not\"\n                     \" supported today in torch.compile\"\n                 )\n-            return self._handle_skip(ConvertFrameReturn(skip_reason=skip_reason), frame)\n+                apply_to_code = False\n+            return self._handle_skip(\n+                ConvertFrameReturn(\n+                    apply_to_code=apply_to_code, skip_reason=skip_reason\n+                ),\n+                frame,\n+            )\n \n         if (\n             frame.f_code.co_filename == \"<string>\" and frame.f_code.co_name == \"__new__\"\n",
+  "test_patch": "diff --git a/test/dynamo/test_modes.py b/test/dynamo/test_modes.py\nindex 71d1858c221b6..0f3b858097b5f 100644\n--- a/test/dynamo/test_modes.py\n+++ b/test/dynamo/test_modes.py\n@@ -131,13 +131,35 @@ def fn(x):\n         cnt = torch._dynamo.testing.CompileCounter()\n \n         x = torch.tensor([3.0])\n+        compiled_fn = torch.compile(fn, backend=cnt)\n         with RewriteAddToMul():\n             eager_res = fn(x)\n-            compiled_res = torch.compile(fn, backend=cnt)(x)\n+            compiled_res = compiled_fn(x)\n \n         self.assertEqual(eager_res, compiled_res)\n         self.assertEqual(cnt.frame_count, 0)\n \n+        self.assertEqual(compiled_fn(x), fn(x))\n+        self.assertEqual(cnt.frame_count, 1)\n+\n+    def test_flop_counter_mode_compile_skip_is_transient(self):\n+        from torch.utils.flop_counter import FlopCounterMode\n+\n+        def fn(x, y):\n+            return (x @ y).sin()\n+\n+        cnt = torch._dynamo.testing.CompileCounter()\n+        x = torch.randn(4, 4)\n+        y = torch.randn(4, 4)\n+\n+        with FlopCounterMode(display=False):\n+            compiled_fn = torch.compile(fn, backend=cnt)\n+            self.assertEqual(compiled_fn(x, y), fn(x, y))\n+\n+        self.assertEqual(cnt.frame_count, 0)\n+        self.assertEqual(compiled_fn(x, y), fn(x, y))\n+        self.assertEqual(cnt.frame_count, 1)\n+\n     def test_get_current_dispatch_mode_stack_no_graph_break(self):\n         from torch.utils._python_dispatch import _get_current_dispatch_mode_stack\n \n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_modes.py::TorchDispatchModeTests::test_flop_counter_mode_compile_skip_is_transient"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_builtin_equivalent_funcs",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_error_empty_stack_pop_torch_function_mode",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_expand",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_intermedate_torch_function_mode_construction_mutation",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_is_torch_function_all_disabled",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_len_torch_function_mode",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_nested_torch_function_mode",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_pop_torch_function_mode",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_push_torch_function_mode",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_register_hook",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_stack_state_clear_default_device",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_stack_state_mutation_default_device",
+    "test/dynamo/test_modes.py::TorchFunctionModeTests::test_tensor_unflatten_with_default_device"
+  ],
+  "test_files": [
+    "test/dynamo/test_modes.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/convert_frame.py"
+  ],
+  "created_at": "2026-07-17T00:03:36Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

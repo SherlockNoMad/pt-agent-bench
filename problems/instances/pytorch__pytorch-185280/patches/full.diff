@@ -1,0 +1,156 @@
+diff --git a/test/dynamo/test_recompiles.py b/test/dynamo/test_recompiles.py
+index 2f978a44369da..f79b951957ad5 100644
+--- a/test/dynamo/test_recompiles.py
++++ b/test/dynamo/test_recompiles.py
+@@ -7,6 +7,10 @@
+ from torch._dynamo import config as dc
+ 
+ 
++_GLOBAL_SPLIT_SIZE = 0
++_MISSING = object()
++
++
+ class RecompileTests(torch._dynamo.test_case.TestCase):
+     def test_automatic_dynamic_reduce_recompiles(self):
+         # Test the counterfactual, lots of recompiles without this config
+@@ -164,6 +168,51 @@ def run_with_automatic():
+         self.assertEqual(with_automatic.frame_count, 3)
+         self.assertEqual(with_automatic.op_count, 3)
+ 
++    def test_automatic_dynamic_unspecializes_global_int_split_size(self):
++        global _GLOBAL_SPLIT_SIZE
++
++        def foo(hidden_states):
++            hidden_states_t = hidden_states.transpose(0, 1)
++            _, prefill = torch.split(hidden_states_t, [0, _GLOBAL_SPLIT_SIZE], dim=-1)
++            return prefill.transpose(0, 1).sin()
++
++        counter = torch._dynamo.testing.CompileCounter()
++        opt = torch.compile(foo, backend=counter, fullgraph=True)
++
++        old_split_size = _GLOBAL_SPLIT_SIZE
++        try:
++            for split_size in [8, 4, 3, 2, 6]:
++                _GLOBAL_SPLIT_SIZE = split_size
++                opt(torch.randn(split_size, 4))
++        finally:
++            _GLOBAL_SPLIT_SIZE = old_split_size
++
++        self.assertEqual(counter.frame_count, 2)
++
++    def test_automatic_dynamic_keeps_torch_module_int_attrs_static(self):
++        attr_name = "_dynamo_test_int"
++        old_value = getattr(torch, attr_name, _MISSING)
++
++        def foo(x):
++            import torch
++
++            return x * torch._dynamo_test_int
++
++        counter = torch._dynamo.testing.CompileCounter()
++        opt = torch.compile(foo, backend=counter, fullgraph=True)
++
++        try:
++            for value in [2, 3, 4]:
++                setattr(torch, attr_name, value)
++                opt(torch.randn(2))
++        finally:
++            if old_value is _MISSING:
++                delattr(torch, attr_name)
++            else:
++                setattr(torch, attr_name, old_value)
++
++        self.assertEqual(counter.frame_count, 3)
++
+     def test_aliasing_guard_failures(self):
+         def foo(a, b, c):
+             a.add_(b)
+diff --git a/torch/_dynamo/variables/builder.py b/torch/_dynamo/variables/builder.py
+index 3ce73703815c7..a9da82d6b8b56 100644
+--- a/torch/_dynamo/variables/builder.py
++++ b/torch/_dynamo/variables/builder.py
+@@ -141,6 +141,7 @@
+     DynamicScalarSource,
+     FloatTensorSource,
+     GetItemSource,
++    GlobalSource,
+     GradSource,
+     is_constant_source,
+     is_from_closure_source,
+@@ -649,6 +650,17 @@ class _missing:
+     pass
+ 
+ 
++def _is_torch_module_attr_source(source: Source) -> bool:
++    if not isinstance(source, ChainedSource):
++        return False
++    base_source = source.get_base()
++    return isinstance(base_source, GlobalSource) and (
++        base_source.global_name == "torch"
++        or base_source.global_name == "__import_torch"
++        or base_source.global_name.startswith("__import_torch_dot")
++    )
++
++
+ @dataclasses.dataclass
+ class GraphArg:
+     source: Source | None
+@@ -2796,12 +2808,21 @@ def wrap_literal(self, value: object) -> VariableTracker:
+                             "integer into a tensor."
+                         )
+ 
+-                    process_automatic_dynamic(
++                    frame_state_entry = process_automatic_dynamic(
+                         self.tx,
+                         self.source.name,
+                         FrameStateSizeEntry.make_scalar(value),
+                         is_unspecialized_nn_module=self.source.guard_source.is_unspecialized_nn_module(),
+                     )
++                    if (
++                        config.automatic_dynamic_shapes
++                        and frame_state_entry.scalar is auto_dynamic
++                        and not self.source.guard_source.is_unspecialized_builtin_nn_module()
++                        and not _is_torch_module_attr_source(self.source)
++                    ):
++                        return self.wrap_symint(
++                            value, frame_state_entry=frame_state_entry
++                        )
+                     self.install_guards(
+                         functools.partial(
+                             GuardBuilder.EQUALS_MATCH, recompile_hint=recompile_hint
+@@ -3293,6 +3314,7 @@ def wrap_symint(
+         value: int,
+         dynamism: DimDynamic | None = None,
+         context: SymIntSymbolicContext | None = None,
++        frame_state_entry: FrameStateSizeEntry | None = None,
+     ) -> VariableTracker:
+         if type(value) is not int:
+             raise AssertionError(f"Expected exact int type, got {type(value)}")
+@@ -3301,7 +3323,6 @@ def wrap_symint(
+             return self.tx.output.unspec_variable_map[self.name]
+ 
+         shape_env = self.tx.output.shape_env
+-        frame_state_entry: FrameStateSizeEntry | None = None
+         if TracingContext.get().force_unspec_int_unbacked_size_like:
+             wrapped_value = shape_env.create_unbacked_symint()
+             _constrain_range_for_size(wrapped_value)
+@@ -3324,12 +3345,13 @@ def wrap_symint(
+ 
+             name = self.source.name
+ 
+-            frame_state_entry = process_automatic_dynamic(
+-                self.tx,
+-                name,
+-                FrameStateSizeEntry.make_scalar(value),
+-                is_unspecialized_nn_module=self.source.guard_source.is_unspecialized_nn_module(),
+-            )
++            if frame_state_entry is None:
++                frame_state_entry = process_automatic_dynamic(
++                    self.tx,
++                    name,
++                    FrameStateSizeEntry.make_scalar(value),
++                    is_unspecialized_nn_module=self.source.guard_source.is_unspecialized_nn_module(),
++                )
+ 
+             # TODO: This should be dynamic, as we in general do not
+             # know if bare integers are actually going to be sizevars

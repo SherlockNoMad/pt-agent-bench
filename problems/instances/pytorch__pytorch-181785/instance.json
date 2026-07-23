@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-181785",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "181765"
+  ],
+  "pull_number": 181785,
+  "base_commit": "70e557066f33e403a82b12748d021badbdc82aac",
+  "problem_statement": "Library teardown leaves stale _OpNamespace cache, breaking CIA op enumeration (TypeError: 'CustomDecompTable' object is not a mapping)\n\n## Summary\n\nDestroying a `torch.library.Library` (DEF mode) after its op has been called\nleaves `torch.ops` in a poisoned state: the `_OpNamespace` still lists the\nnamespace and `OpOverloadPacket._overload_names` still lists `'default'`, but\n`getattr(packet, 'default')` raises `AttributeError` because the underlying op\nhas been deregistered from the C++ dispatcher.\n\nAny subsequent code that walks all CompositeImplicitAutograd ops crashes \u2014\nmost visibly, `{**core_aten_decompositions()}` at\n`torch/_inductor/decomposition.py:108` surfaces the underlying `AttributeError`\nas the misleading `TypeError: 'CustomDecompTable' object is not a mapping`\n(CPython's `DICT_UPDATE` opcode rewrites `AttributeError` that way).\n\n## Repro\n\n```python\nimport torch\nfrom torch.library import Library, impl\n\nmy_lib = Library('my_lib', 'DEF')\nmy_lib.define('my_func() -> None')\n\n@impl(my_lib, 'my_func', '')\ndef my_func(): pass\n\ntorch.ops.my_lib.my_func()   # required\ndel my_lib                    # required\n\nfrom torch._inductor.cudagraph_trees import reset_cudagraph_trees\n# TypeError: 'CustomDecompTable' object is not a mapping\n```\n\nThe actual error, hidden by the dict-spread, is at\n`torch/_export/utils.py:1368` in `_collect_all_valid_cia_ops_for_namespace`:\n\n```\nAttributeError: The underlying op of 'my_lib.my_func' has no overload name 'default'\n```\n\n## How this manifests in CI\n\nslow-gradcheck periodic jobs (e.g. job 73398436183 in run 25055128899) hit\nthis in `test_torch.py` after `test_storage_preserve_nonhermetic_in_hermetic_context`\npoisons the namespace. Subsequent CUDA tests then fail in\n`before_cuda_memory_leak_check` \u2192 `torch._dynamo.reset()` \u2192 lazy import chain\ninto `torch._inductor.decomposition`.\n\nThe trigger landed in #181040, which added the `before_cuda_memory_leak_check`\nhook calling `torch._dynamo.reset()`. The latent bug in CIA op enumeration\npredates that \u2014 likely from #137650 (lazy decomp table) \u2014 but only became\nreachable mid-suite after #181040.\n\nThe flaky-test disabler has been auto-creating per-test \\\"DISABLED ...\\\" issues\n(#181343, #181684, #181537, ...) that paper over the symptom without\naddressing the root cause.\n\n## Possible fixes\n\n1. `_collect_all_valid_cia_ops_for_namespace` skips overloads that no longer\n   resolve (cheapest, most defensive).\n2. `Library.__del__` cleans up the corresponding `_OpNamespace` cache and\n   `torch.ops._dir` entries (most correct, but trickier \u2014 multiple Library\n   objects can share a namespace).\n3. `OpOverloadPacket.overloads()` re-queries the dispatcher rather than\n   returning the cached `_overload_names`.\n\nIndependently, `torch/_inductor/decomposition.py:108` should arguably use\n`dict(core_aten_decompositions())` instead of `{**...}` so the real error\nisn't masked.\n\ncc @anjali411 @chauhang @penguinwu @bdhirsh @bobrenjc93 @jansel @tugsbayasgalan",
+  "patch": "diff --git a/torch/library.py b/torch/library.py\nindex 18c4c6ec61609..a39b7ecd797ab 100644\n--- a/torch/library.py\n+++ b/torch/library.py\n@@ -572,21 +572,28 @@ def _destroy(self):\n         self._registration_handles.clear()\n         global _impls\n         _impls -= self._op_impls\n-        for name in self._op_defs:\n-            # Delete the cached torch.ops.ns.foo if it was registered.\n-            # Otherwise, accessing it leads to a segfault.\n-            # It's possible that we only registered an overload in this Library\n-            # and another library owns an alive overload.\n-            # That's OK - the next time torch.ops.ns.foo gets called, it'll be\n-            # recomputed to point at the right collection of overloads.\n-            ns, name_with_overload = name.split(\"::\")\n-            name = name_with_overload.split(\".\")[0]\n-            if not hasattr(torch.ops, ns):\n-                continue\n-            namespace = getattr(torch.ops, ns)\n-            if not hasattr(namespace, name):\n-                continue\n-            delattr(namespace, name)\n+        _clear_torch_ops_cache(self._op_defs)\n+\n+\n+def _clear_torch_ops_cache(op_defs):\n+    # Delete the cached torch.ops.ns.foo if it was registered.\n+    # Otherwise, accessing it leads to a segfault, or to enumerations\n+    # over the namespace (e.g. _collect_all_valid_cia_ops) tripping on\n+    # an OpOverloadPacket whose underlying overload was just removed.\n+    # It's possible that we only registered an overload in this Library\n+    # and another library owns an alive overload.\n+    # That's OK - the next time torch.ops.ns.foo gets called, it'll be\n+    # recomputed to point at the right collection of overloads.\n+    for qualname in op_defs:\n+        ns, name_with_overload = qualname.split(\"::\")\n+        name = name_with_overload.split(\".\")[0]\n+        if not hasattr(torch.ops, ns):\n+            continue\n+        namespace = getattr(torch.ops, ns)\n+        if not hasattr(namespace, name):\n+            continue\n+        delattr(namespace, name)\n+        if name in namespace._dir:\n             namespace._dir.remove(name)\n \n \n@@ -618,6 +625,8 @@ def _del_library(\n     if m is not None:\n         m.reset()\n \n+    _clear_torch_ops_cache(op_defs)\n+\n \n @contextlib.contextmanager\n def _scoped_library(*args, **kwargs):\n",
+  "test_patch": "diff --git a/test/test_python_dispatch.py b/test/test_python_dispatch.py\nindex 71afd0c09851e..b2d7dc590d335 100644\n--- a/test/test_python_dispatch.py\n+++ b/test/test_python_dispatch.py\n@@ -422,6 +422,28 @@ def foo123(x):\n         # lib's finalizer should not have a reference anymore\n         self.assertEqual(sys.getrefcount(torch.library._impls), impls_refcnt)\n \n+    def test_finalizer_clears_torch_ops_cache(self):\n+        # Regression test for https://github.com/pytorch/pytorch/issues/181765:\n+        # `del lib` (running the finalizer) must clear the cached\n+        # OpOverloadPacket on torch.ops.<ns>, otherwise iterating ops in that\n+        # namespace later raises AttributeError.\n+        lib = Library(self.test_ns, \"DEF\")  # noqa: TOR901\n+        lib.define(\"my_func() -> None\")\n+\n+        @impl(lib, \"my_func\", \"\")\n+        def my_func():\n+            pass\n+\n+        torch.ops._test_python_registration.my_func()\n+        del lib\n+        gc.collect()\n+\n+        namespace = torch.ops._test_python_registration\n+        self.assertNotIn(\"my_func\", namespace._dir)\n+        from torch._export.utils import _collect_all_valid_cia_ops_for_namespace\n+\n+        _collect_all_valid_cia_ops_for_namespace(namespace)\n+\n     def test_override_cpu_sum(self) -> None:\n         # Example 1\n         run = [False]\n",
+  "FAIL_TO_PASS": [
+    "test/test_python_dispatch.py::TestPythonRegistration::test_finalizer_clears_torch_ops_cache"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_python_dispatch.py::TestDispatcherPythonBindings::test_call_boxed",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_alias_analysis",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_create_new_library",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_create_new_library_fragment_no_existing",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_create_new_library_fragment_with_existing",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_dispatcher_error_filenames",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_dispatchkeyset_eq",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_dispatchkeyset_pickle",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_error_for_unsupported_ns_or_kind",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_error_if_fn_not_callable",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_exclude_dispatch_key_guard_restores_tls_exactly_key0",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_exclude_dispatch_key_guard_restores_tls_exactly_key1",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_exclude_dispatch_key_guard_restores_tls_exactly_key2",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_extend_library_with_dispatch_key_arg",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_fallback",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_fallback_fallthrough",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_fallback_keyset",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_fallthrough_for_dense_key_with_meta_in_tls",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_finalizer",
+    "test/test_python_dispatch.py::TestPythonRegistration::test_global_enter"
+  ],
+  "test_files": [
+    "test/test_python_dispatch.py"
+  ],
+  "fix_files": [
+    "torch/library.py"
+  ],
+  "created_at": "2026-04-28T20:18:30Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

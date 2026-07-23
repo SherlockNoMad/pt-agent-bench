@@ -1,0 +1,47 @@
+{
+  "instance_id": "pytorch__pytorch-184972",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "171204"
+  ],
+  "pull_number": 184972,
+  "base_commit": "363a8d9aa598fb025487dc889293c7d2f8b6186d",
+  "problem_statement": "Dynamo can't trace a code when we construct nn.Parameter in the forward.\n\n### \ud83d\udc1b Describe the bug\n\n```python \nimport torch\nimport torch._dynamo\n\ntorch._dynamo.config.graph_break_on_nn_param_ctor = False\n\ndef fn(x):\n    w = torch.nn.Parameter(torch.ones(4, 4))\n    if w.grad is None:\n        w.grad = torch.zeros_like(w)\n    return w.grad + x\n\nx = torch.randn(4, 4)\ncompiled_fn = torch.compile(fn, backend='eager', fullgraph=True)\nresult = compiled_fn(x)\n```\n```\nUnsupported: Failed to trace builtin operator\n  Explanation: Dynamo does not know how to trace builtin operator `add` with argument types ['<unknown type>', 'Tensor'] (has_kwargs False)\n  Hint: Avoid calling builtin `add` with argument types ['<unknown type>', 'Tensor']. Consider using an equivalent alternative function/method to `add`.\n  Hint: If you are attempting to call a logging function (e.g. `print`), you can try adding it to `torch._dynamo.config.reorderable_logging_functions`.\n  Hint: Please report an issue to PyTorch.\n\n  Developer debug context: builtin add [<class 'torch._dynamo.variables.misc.GetAttrVariable'>, <class 'torch._dynamo.variables.tensor.TensorVariable'>] False\n\n For more details about this graph break, please visit: https://meta-pytorch.github.io/compile-graph-break-site/gb/gb0059.html\n\nfrom user code:\n   File \"/tmp/ipykernel_616085/151731544.py\", line 10, in fn\n    return w.grad + x\n\nSet TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=\"+dynamo\"\n```\nI think this is due to the fact we are emitting generic GetAttr node for w.grad instead of proper type. \n\n### Versions\n\nmain\n\ncc @ezyang @gchanan @kadeng @msaroufim @voznesenskym @penguinwu @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @chauhang @amjames @Lucaskabela @jataylo",
+  "patch": "diff --git a/torch/_dynamo/variables/tensor.py b/torch/_dynamo/variables/tensor.py\nindex 80234a56f8fba..90d7ea5313341 100644\n--- a/torch/_dynamo/variables/tensor.py\n+++ b/torch/_dynamo/variables/tensor.py\n@@ -577,6 +577,11 @@ def method_attr_grad(\n     ) -> VariableTracker | None:\n         if tx.output.side_effects.has_pending_mutation_of_attr(self, \"grad\"):\n             return tx.output.side_effects.load_attr(self, \"grad\")\n+        if (\n+            isinstance(self.mutation_type, AttributeMutationNew)\n+            and not self.has_grad_fn\n+        ):\n+            return ConstantVariable.create(None)\n         # None tells var_getattr to use default .grad handling\n         return None\n \n",
+  "test_patch": "diff --git a/test/dynamo/test_misc.py b/test/dynamo/test_misc.py\nindex 1166215d267b1..8f76dacae9504 100644\n--- a/test/dynamo/test_misc.py\n+++ b/test/dynamo/test_misc.py\n@@ -6182,6 +6182,47 @@ def fn(a, b):\n         self.assertEqual(cnts.frame_count, 1)\n         self.assertEqual(cnts.op_count, 3)\n \n+    @torch._dynamo.config.patch(graph_break_on_nn_param_ctor=False)\n+    def test_param_grad_in_forward(self):\n+        cnts = torch._dynamo.testing.CompileCounter()\n+\n+        def fn(x):\n+            w = torch.nn.Parameter(torch.ones(4, 4))\n+            saw_none = w.grad is None\n+            if saw_none:\n+                w.grad = torch.zeros_like(w)\n+            return saw_none, w.grad + x\n+\n+        x = torch.randn(4, 4)\n+        ref = fn(x)\n+\n+        opt_fn = torch.compile(fn, backend=cnts, fullgraph=True)\n+        res = opt_fn(x)\n+\n+        self.assertTrue(res[0])\n+        self.assertEqual(ref[1], res[1])\n+        self.assertEqual(cnts.frame_count, 1)\n+\n+    @torch._dynamo.config.patch(\n+        graph_break_on_nn_param_ctor=False, trace_autograd_ops=True\n+    )\n+    def test_param_autograd_grad_in_forward(self):\n+        def fn(x):\n+            w = torch.nn.Parameter(torch.ones(4, 4))\n+            y = (x @ w).sum()\n+            (grad,) = torch.autograd.grad(y, w)\n+            return grad is not None, w.grad is None, grad\n+\n+        x = torch.randn(4, 4)\n+        ref = fn(x)\n+\n+        opt_fn = torch.compile(fn, backend=\"eager\", fullgraph=False)\n+        res = opt_fn(x)\n+\n+        self.assertTrue(res[0])\n+        self.assertTrue(res[1])\n+        self.assertEqual(ref[2], res[2])\n+\n     def test_intermediary_tensor_grad_access(self):\n         # This test creates a model, and accesses the grads\n         # from its parameters and an entirely intermediary tensor.\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_misc.py::MiscTests::test_param_autograd_grad_in_forward",
+    "test/dynamo/test_misc.py::MiscTests::test_param_grad_in_forward"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_misc.py::MiscTests::test_312_binary_slice_with_graph_break1",
+    "test/dynamo/test_misc.py::MiscTests::test_312_binary_slice_with_graph_break2",
+    "test/dynamo/test_misc.py::MiscTests::test_RAISE_VARARGS_0",
+    "test/dynamo/test_misc.py::MiscTests::test_T_tensor_attribute",
+    "test/dynamo/test_misc.py::MiscTests::test___build_class__",
+    "test/dynamo/test_misc.py::MiscTests::test___build_class___disabled",
+    "test/dynamo/test_misc.py::MiscTests::test_add_sizes",
+    "test/dynamo/test_misc.py::MiscTests::test_add_to_set",
+    "test/dynamo/test_misc.py::MiscTests::test_anomaly_aot_autograd",
+    "test/dynamo/test_misc.py::MiscTests::test_any_all_symnode",
+    "test/dynamo/test_misc.py::MiscTests::test_aot_autograd_propagate_unbacked_symints_shape",
+    "test/dynamo/test_misc.py::MiscTests::test_arange_length_with_float32_dtype",
+    "test/dynamo/test_misc.py::MiscTests::test_argwhere_with_dynamic_shapes",
+    "test/dynamo/test_misc.py::MiscTests::test_assert",
+    "test/dynamo/test_misc.py::MiscTests::test_assert_size_stride",
+    "test/dynamo/test_misc.py::MiscTests::test_assigning_function_to_class_attribute",
+    "test/dynamo/test_misc.py::MiscTests::test_assigning_function_to_object_attribute",
+    "test/dynamo/test_misc.py::MiscTests::test_backend_match_guard"
+  ],
+  "test_files": [
+    "test/dynamo/test_misc.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/variables/tensor.py"
+  ],
+  "created_at": "2026-06-03T05:07:02Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

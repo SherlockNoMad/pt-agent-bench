@@ -1,0 +1,86 @@
+diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py
+index 59c768a156602..f38b27952a77a 100644
+--- a/test/dynamo/test_repros.py
++++ b/test/dynamo/test_repros.py
+@@ -6506,6 +6506,21 @@ def fn(x):
+ 
+         fn(torch.randn(4))
+ 
++    # https://github.com/pytorch/pytorch/issues/189925
++    def test_io_text_encoding(self):
++        import _io
++
++        @torch.compile(backend="eager", fullgraph=True)
++        def fn(x):
++            enc_explicit = _io.text_encoding("utf-8")
++            enc_default = _io.text_encoding(None)
++            return torch.sin(x), enc_explicit, enc_default
++
++        x = torch.randn(4)
++        _, enc_explicit, enc_default = fn(x)
++        self.assertEqual(enc_explicit, _io.text_encoding("utf-8"))
++        self.assertEqual(enc_default, _io.text_encoding(None))
++
+     # https://github.com/pytorch/pytorch/issues/88813
+     def test_return_value_duplication_tensor(self) -> None:
+         def fn(val: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+diff --git a/torch/_dynamo/polyfills/__init__.py b/torch/_dynamo/polyfills/__init__.py
+index 1b332c04758ec..d4a07c009d4cc 100644
+--- a/torch/_dynamo/polyfills/__init__.py
++++ b/torch/_dynamo/polyfills/__init__.py
+@@ -32,6 +32,7 @@
+         _collections as _collections,
+         builtins as builtins,
+         functools as functools,
++        io as io,
+         itertools as itertools,
+         operator as operator,
+         os as os,
+diff --git a/torch/_dynamo/polyfills/io.py b/torch/_dynamo/polyfills/io.py
+new file mode 100644
+index 0000000000000..a75e062f46e46
+--- /dev/null
++++ b/torch/_dynamo/polyfills/io.py
+@@ -0,0 +1,30 @@
++"""
++Python polyfills for _io
++"""
++
++from __future__ import annotations
++
++import _io
++
++import sys
++import warnings
++
++from ..decorators import substitute_in_graph
++
++
++__all__ = ["text_encoding"]
++
++
++# Copied from Lib/_pyio.py in the standard library
++# pyrefly: ignore [bad-argument-type]
++@substitute_in_graph(_io.text_encoding, can_constant_fold_through=True)
++def text_encoding(encoding: str | None, stacklevel: int = 2, /) -> str:
++    if encoding is None:
++        encoding = "utf-8" if sys.flags.utf8_mode else "locale"
++        if sys.flags.warn_default_encoding:
++            warnings.warn(
++                "'encoding' argument not specified.",
++                EncodingWarning,
++                stacklevel + 1,
++            )
++    return encoding
+diff --git a/torch/_dynamo/polyfills/loader.py b/torch/_dynamo/polyfills/loader.py
+index cfce3edfb0ab0..9defe564e45fb 100644
+--- a/torch/_dynamo/polyfills/loader.py
++++ b/torch/_dynamo/polyfills/loader.py
+@@ -19,6 +19,7 @@
+     "builtins",
+     "copy",
+     "functools",
++    "io",
+     "itertools",
+     "operator",
+     "os",

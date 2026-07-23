@@ -1,0 +1,151 @@
+diff --git a/test/test_fake_tensor.py b/test/test_fake_tensor.py
+index f78a15ed178a0..b2316161cef4d 100644
+--- a/test/test_fake_tensor.py
++++ b/test/test_fake_tensor.py
+@@ -33,6 +33,7 @@
+ from torch._higher_order_ops.scan import scan
+ from torch._subclasses.fake_tensor import (
+     _CacheKeyState,
++    _check_for_subclass_arg,
+     DynamicOutputShapeException,
+     extract_tensor_metadata,
+     FakeTensor,
+@@ -166,6 +167,101 @@ def foo_impl(self):
+                     x = mode.from_tensor(x)
+                     torch.ops.my_test_op.foo(x)
+ 
++    def test_custom_op_fake_impl_with_parameter_subclass(self):
++        class ParameterSubclass(torch.nn.Parameter):
++            pass
++
++        @torch.library.custom_op(
++            "_torch_testing::fake_tensor_parameter_subclass", mutates_args=()
++        )
++        def custom_op(weight: torch.Tensor) -> torch.Tensor:
++            return weight.clone()
++
++        @custom_op.register_fake
++        def custom_op_fake(weight: torch.Tensor) -> torch.Tensor:
++            return torch.empty_like(weight)
++
++        weight = ParameterSubclass(torch.randn(10, 10))
++        with self.assertRaisesRegex(
++            AssertionError,
++            "Please convert all Tensors to FakeTensors first",
++        ):
++            with FakeTensorMode():
++                torch.ops._torch_testing.fake_tensor_parameter_subclass(weight)
++
++        with FakeTensorMode(allow_non_fake_inputs=True):
++            result = torch.ops._torch_testing.fake_tensor_parameter_subclass(weight)
++
++        self.assertIsInstance(result, FakeTensor)
++        self.assertEqual(result.shape, weight.shape)
++        self.assertEqual(result.device, torch.device("cpu"))
++
++    def test_parameter_subclass_with_torch_dispatch_gets_subclass_dispatch(self):
++        dispatch_calls = []
++        fake_impl_calls = []
++
++        @torch.library.custom_op(
++            "_torch_testing::fake_tensor_dispatch_parameter_subclass",
++            mutates_args=(),
++        )
++        def custom_op(weight: torch.Tensor) -> torch.Tensor:
++            return weight.clone()
++
++        @custom_op.register_fake
++        def custom_op_fake(weight: torch.Tensor) -> torch.Tensor:
++            fake_impl_calls.append(True)
++            return torch.empty_like(weight)
++
++        class DispatchParameter(torch.nn.Parameter):
++            @classmethod
++            def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
++                dispatch_calls.append(func)
++                if (
++                    func
++                    is torch.ops._torch_testing.fake_tensor_dispatch_parameter_subclass.default
++                ):
++                    weight = args[0]
++                    return torch.empty(
++                        weight.shape, dtype=weight.dtype, device=weight.device
++                    )
++                return NotImplemented
++
++        weight = DispatchParameter(torch.randn(10, 10))
++        with FakeTensorMode():
++            result = torch.ops._torch_testing.fake_tensor_dispatch_parameter_subclass(
++                weight
++            )
++
++        self.assertIsInstance(result, FakeTensor)
++        self.assertEqual(result.shape, weight.shape)
++        self.assertEqual(result.device, torch.device("cpu"))
++        self.assertEqual(
++            dispatch_calls,
++            [torch.ops._torch_testing.fake_tensor_dispatch_parameter_subclass.default],
++        )
++        self.assertEqual(fake_impl_calls, [])
++
++    def test_check_for_subclass_arg_parameter_subclass(self):
++        class ParameterSubclass(torch.nn.Parameter):
++            pass
++
++        class DispatchParameter(torch.nn.Parameter):
++            @classmethod
++            def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
++                return NotImplemented
++
++        self.assertFalse(_check_for_subclass_arg(torch.randn(10)))
++        self.assertFalse(_check_for_subclass_arg(torch.nn.Parameter(torch.randn(10))))
++        self.assertFalse(_check_for_subclass_arg(ParameterSubclass(torch.randn(10))))
++        self.assertTrue(_check_for_subclass_arg(DispatchParameter(torch.randn(10))))
++
++        with FakeTensorMode() as mode:
++            fake = mode.from_tensor(torch.randn(10))
++        self.assertFalse(_check_for_subclass_arg(fake))
++
++        tt_param = torch.nn.Parameter(TwoTensor(torch.randn(4, 4), torch.randn(4, 4)))
++        self.assertTrue(_check_for_subclass_arg(tt_param))
++
+     def test_parameter_instantiation(self):
+         with FakeTensorMode():
+             x = torch.rand([4])
+diff --git a/torch/_subclasses/fake_tensor.py b/torch/_subclasses/fake_tensor.py
+index e7b72efcf0923..2e701df9c7718 100644
+--- a/torch/_subclasses/fake_tensor.py
++++ b/torch/_subclasses/fake_tensor.py
+@@ -3449,12 +3449,27 @@ def _check_for_subclass(flat_args: Sequence[object]) -> bool:
+ 
+ 
+ def _check_for_subclass_arg(x: object) -> bool:
+-    return (
+-        not isinstance(x, FakeTensor)
+-        and isinstance(x, Tensor)
+-        and type(x) is not Tensor
+-        and type(x) is not torch.nn.Parameter
++    if isinstance(x, FakeTensor):
++        return False
++    if not isinstance(x, Tensor):
++        return False
++
++    x_type = type(x)
++    if x_type is Tensor:
++        return False
++
++    # Use the concrete type instead of isinstance because wrapper subclasses
++    # marked as Parameters (e.g. Parameter(TwoTensor(...))) still need subclass
++    # dispatch. Only metadata-only Parameter subclasses that inherit Tensor's
++    # disabled __torch_dispatch__ can follow the regular Parameter path.
++    is_metadata_only_parameter_subclass = (
++        issubclass(x_type, torch.nn.Parameter)
++        and x_type.__torch_dispatch__ is Tensor.__torch_dispatch__
+     )
++    if is_metadata_only_parameter_subclass:
++        return False
++
++    return True
+ 
+ 
+ _DISPATCH_META_HANDLERS = {

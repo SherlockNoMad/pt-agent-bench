@@ -1,0 +1,90 @@
+diff --git a/test/test_python_dispatch.py b/test/test_python_dispatch.py
+index 71afd0c09851e..b2d7dc590d335 100644
+--- a/test/test_python_dispatch.py
++++ b/test/test_python_dispatch.py
+@@ -422,6 +422,28 @@ def foo123(x):
+         # lib's finalizer should not have a reference anymore
+         self.assertEqual(sys.getrefcount(torch.library._impls), impls_refcnt)
+ 
++    def test_finalizer_clears_torch_ops_cache(self):
++        # Regression test for https://github.com/pytorch/pytorch/issues/181765:
++        # `del lib` (running the finalizer) must clear the cached
++        # OpOverloadPacket on torch.ops.<ns>, otherwise iterating ops in that
++        # namespace later raises AttributeError.
++        lib = Library(self.test_ns, "DEF")  # noqa: TOR901
++        lib.define("my_func() -> None")
++
++        @impl(lib, "my_func", "")
++        def my_func():
++            pass
++
++        torch.ops._test_python_registration.my_func()
++        del lib
++        gc.collect()
++
++        namespace = torch.ops._test_python_registration
++        self.assertNotIn("my_func", namespace._dir)
++        from torch._export.utils import _collect_all_valid_cia_ops_for_namespace
++
++        _collect_all_valid_cia_ops_for_namespace(namespace)
++
+     def test_override_cpu_sum(self) -> None:
+         # Example 1
+         run = [False]
+diff --git a/torch/library.py b/torch/library.py
+index 18c4c6ec61609..a39b7ecd797ab 100644
+--- a/torch/library.py
++++ b/torch/library.py
+@@ -572,21 +572,28 @@ def _destroy(self):
+         self._registration_handles.clear()
+         global _impls
+         _impls -= self._op_impls
+-        for name in self._op_defs:
+-            # Delete the cached torch.ops.ns.foo if it was registered.
+-            # Otherwise, accessing it leads to a segfault.
+-            # It's possible that we only registered an overload in this Library
+-            # and another library owns an alive overload.
+-            # That's OK - the next time torch.ops.ns.foo gets called, it'll be
+-            # recomputed to point at the right collection of overloads.
+-            ns, name_with_overload = name.split("::")
+-            name = name_with_overload.split(".")[0]
+-            if not hasattr(torch.ops, ns):
+-                continue
+-            namespace = getattr(torch.ops, ns)
+-            if not hasattr(namespace, name):
+-                continue
+-            delattr(namespace, name)
++        _clear_torch_ops_cache(self._op_defs)
++
++
++def _clear_torch_ops_cache(op_defs):
++    # Delete the cached torch.ops.ns.foo if it was registered.
++    # Otherwise, accessing it leads to a segfault, or to enumerations
++    # over the namespace (e.g. _collect_all_valid_cia_ops) tripping on
++    # an OpOverloadPacket whose underlying overload was just removed.
++    # It's possible that we only registered an overload in this Library
++    # and another library owns an alive overload.
++    # That's OK - the next time torch.ops.ns.foo gets called, it'll be
++    # recomputed to point at the right collection of overloads.
++    for qualname in op_defs:
++        ns, name_with_overload = qualname.split("::")
++        name = name_with_overload.split(".")[0]
++        if not hasattr(torch.ops, ns):
++            continue
++        namespace = getattr(torch.ops, ns)
++        if not hasattr(namespace, name):
++            continue
++        delattr(namespace, name)
++        if name in namespace._dir:
+             namespace._dir.remove(name)
+ 
+ 
+@@ -618,6 +625,8 @@ def _del_library(
+     if m is not None:
+         m.reset()
+ 
++    _clear_torch_ops_cache(op_defs)
++
+ 
+ @contextlib.contextmanager
+ def _scoped_library(*args, **kwargs):

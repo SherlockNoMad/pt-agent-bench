@@ -1,0 +1,179 @@
+diff --git a/test/export/test_export.py b/test/export/test_export.py
+index 606ca3f2b608c..5d3c448710278 100755
+--- a/test/export/test_export.py
++++ b/test/export/test_export.py
+@@ -2255,9 +2255,15 @@ def forward(self, x):
+ 
+         f = Basic()
+         args = (torch.randn(1, 3),)
+-        # strict-mode will error out because foo is registered as parameter
+-        # in dynamo (a behavior that's different from eager). We decided to
+-        # follow eager behavior.
++        # foo is registered as a parameter in Dynamo, but not in eager.
++        # Follow eager behavior and treat it as a lifted tensor constant.
++        ep = export(f, args, strict=True)
++        gm = ep.module()
++        self.assertEqual(len(ep.graph_signature.lifted_tensor_constants), 1)
++        self.assertEqual(len(ep.graph_signature.parameters), 0)
++        self.assertEqual(len(list(gm.named_parameters())), 0)
++        self.assertEqual(gm(*args), f(*args))
++
+         ep = export(f, args, strict=False)
+         gm = ep.module()
+         self.assertEqual(len(ep.graph_signature.lifted_tensor_constants), 1)
+@@ -2276,6 +2282,46 @@ def forward(self, x):
+     return (add,)""",
+         )
+ 
++    def test_strict_export_unregistered_module_list_parameters(self):
++        class A(torch.nn.Module):
++            def __init__(self):
++                super().__init__()
++                self.a = torch.nn.Parameter(torch.ones(3, 3))
++
++            def forward(self, x):
++                return x + self.a
++
++        class M(torch.nn.Module):
++            def __init__(self):
++                super().__init__()
++                self.models = [A(), A()]
++
++            def forward(self, x):
++                for m in self.models:
++                    x = m(x)
++                return x
++
++        f = M()
++        args = (torch.ones(3, 3),)
++        ep = export(f, args, strict=True)
++        gm = ep.module()
++
++        self.assertEqual(
++            [spec.kind for spec in ep.graph_signature.input_specs],
++            [
++                InputKind.CONSTANT_TENSOR,
++                InputKind.CONSTANT_TENSOR,
++                InputKind.USER_INPUT,
++            ],
++        )
++        self.assertEqual(len(ep.graph_signature.lifted_tensor_constants), 2)
++        self.assertEqual(len(ep.graph_signature.parameters), 0)
++        self.assertEqual(len(ep.state_dict), 0)
++        self.assertEqual(len(list(gm.named_parameters())), 0)
++        for constant in ep.constants.values():
++            self.assertFalse(isinstance(constant, torch.nn.Parameter))
++        self.assertEqual(gm(*args), f(*args))
++
+     def test_int_shape_specialization(self):
+         class M(torch.nn.Module):
+             def forward(self, x):
+diff --git a/torch/export/_trace.py b/torch/export/_trace.py
+index 6ab76a503cfd8..5836ef6a7ae37 100644
+--- a/torch/export/_trace.py
++++ b/torch/export/_trace.py
+@@ -514,21 +514,26 @@ def _preserve_requires_grad_pass(
+                 )
+             constant = constants[spec.target]
+             if isinstance(constant, torch.Tensor):
+-                # If the tensor is not leaf, it should already have a correct requires grad field
+-                if node.meta["val"].is_leaf:
+-                    node.meta["val"].requires_grad = constant.requires_grad
+-                else:
+-                    if node.meta["val"].requires_grad != constant.requires_grad:
+-                        raise AssertionError(
+-                            f"node requires_grad {node.meta['val'].requires_grad} does not match "
+-                            f"constant requires_grad {constant.requires_grad}"
+-                        )
++                _set_constant_requires_grad(node, constant)
+         elif spec.kind in (InputKind.CUSTOM_OBJ, InputKind.TOKEN):
+             continue
+         else:
+             raise AssertionError(spec.kind)
+ 
+ 
++def _set_constant_requires_grad(node: torch.fx.Node, constant: torch.Tensor) -> None:
++    meta_val = node.meta.get("val")
++    if isinstance(meta_val, torch.Tensor):
++        # Non-leaf tensors should already have the correct requires_grad field.
++        if meta_val.is_leaf:
++            meta_val.requires_grad = constant.requires_grad
++        elif meta_val.requires_grad != constant.requires_grad:
++            raise AssertionError(
++                f"node requires_grad {meta_val.requires_grad} does not match "
++                f"constant requires_grad {constant.requires_grad}"
++            )
++
++
+ def _remap_constants(
+     orig_constant_attrs: ConstantAttrMap,
+     graph_signature: ExportGraphSignature,
+@@ -1212,27 +1217,40 @@ def _get_non_persistent_buffers(mod: torch.nn.Module) -> set[str]:
+ 
+ 
+ def _rewrite_dynamo_tensor_constants(
+-    orig_mod_buffers: set[torch.Tensor],
+-    traced_mod_buffers: dict[str, torch.Tensor],
++    orig_mod_state: set[torch.Tensor],
++    traced_mod_state: dict[str, torch.Tensor],
++    gm: torch.fx.GraphModule,
+     graph_signature: ExportGraphSignature,
+     constants: dict[str, _ConstantAttributeType],
+ ) -> None:
+     """
+-    Dynamo erroneously marks tensor attributes on modules as buffers.
++    Dynamo can mark tensor attributes on modules as parameters or buffers.
+     Rewrite them to be tensor constants.
+     """
++    placeholder_lookup = {
++        node.name: node for node in gm.graph.find_nodes(op="placeholder")
++    }
++
+     for spec in graph_signature.input_specs:
+-        if spec.kind == InputKind.BUFFER:
++        if spec.kind in (InputKind.PARAMETER, InputKind.BUFFER):
+             if spec.target is None:
+-                raise AssertionError("spec.target must not be None for BUFFER kind")
+-            value = traced_mod_buffers[spec.target]
+-            if value not in orig_mod_buffers:
+-                # This was a tensor constant erroneously marked as a buffer.
++                raise AssertionError(
++                    f"spec.target must not be None for {spec.kind} kind"
++                )
++            value = traced_mod_state[spec.target]
++            if value not in orig_mod_state:
++                # This was a tensor constant erroneously marked as state.
+                 # Convert it into a constant in the graph signature, and add its
+                 # value to the constants table.
+                 spec.kind = InputKind.CONSTANT_TENSOR
++                spec.persistent = None
++                if isinstance(value, torch.nn.Parameter):
++                    value = value.detach()
+                 constants[spec.target] = value  # type: ignore[arg-type]
+ 
++                node = placeholder_lookup[spec.arg.name]
++                _set_constant_requires_grad(node, value)
++
+ 
+ def _move_non_persistent_buffers_to_tensor_constants(
+     orig_mod: torch.nn.Module,
+@@ -1793,10 +1811,16 @@ def _strict_export(
+ 
+     # Do some cleanups on the graph module to restore the state dict to the
+     # expected form. Each of these steps should probably get fixed upstream.
+-    # 1. Remove tensor constants that were added as buffers.
++    # 1. Remove tensor constants that were added as parameters/buffers.
+     _rewrite_dynamo_tensor_constants(
+-        orig_mod_buffers=set(mod.buffers()),
+-        traced_mod_buffers=dict(gm_torch_level.named_buffers()),
++        orig_mod_state=set(chain(mod.parameters(), mod.buffers())),
++        traced_mod_state=dict(
++            chain(
++                gm_torch_level.named_parameters(remove_duplicate=False),
++                gm_torch_level.named_buffers(remove_duplicate=False),
++            )
++        ),
++        gm=gm,
+         graph_signature=export_graph_signature,
+         constants=constants,
+     )

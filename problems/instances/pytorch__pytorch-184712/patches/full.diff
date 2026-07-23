@@ -1,0 +1,66 @@
+diff --git a/test/dynamo/test_modules.py b/test/dynamo/test_modules.py
+index 7a247db4d3bc9..e2ea7d86e6918 100644
+--- a/test/dynamo/test_modules.py
++++ b/test/dynamo/test_modules.py
+@@ -2454,6 +2454,33 @@ def new_forward_hook(
+         self.assertEqual(compiled_func(inp), outer_func(inp))
+         self.assertEqual(compiled_func(inp).item(), 16)
+ 
++    def test_forward_hook_handle_attr_in_hasattr(self):
++        class TestModule(torch.nn.Module):
++            def __init__(self) -> None:
++                super().__init__()
++                self.encoder = torch.nn.Linear(8, 4)
++                self.decoder = torch.nn.Linear(4, 8)
++
++            def forward(self, x):
++                if not hasattr(self, "_forward_hook"):
++                    self._forward_hook = self.register_forward_hook(
++                        lambda module, inputs, output: output + 1
++                    )
++                return self.decoder(self.encoder(x))
++
++        model = TestModule().eval()
++        x = torch.randn(2, 8)
++
++        with torch.no_grad():
++            model(x)
++            expected = model(x)
++
++        compiled_model = torch.compile(model, backend="eager", fullgraph=True)
++        with torch.no_grad():
++            actual = compiled_model(x)
++
++        self.assertEqual(actual, expected)
++
+     def _forward_hook_test_helper(self, model):
+         forward_handles = {}
+         compiled_activations = {}
+diff --git a/torch/_dynamo/variables/user_defined.py b/torch/_dynamo/variables/user_defined.py
+index bf67793f8e692..a4e327e2850d6 100644
+--- a/torch/_dynamo/variables/user_defined.py
++++ b/torch/_dynamo/variables/user_defined.py
+@@ -3745,6 +3745,23 @@ def call_obj_hasattr(
+                 )
+             )
+ 
++        if not self._object_has_getattribute:
++            type_attr = self.lookup_class_mro_attr(name)
++            if (
++                (type_attr is NO_SUCH_SUBOBJ or not is_data_descriptor(type_attr))
++                and hasattr(self.value, "__dict__")
++                and not tx.output.side_effects.has_pending_mutation_of_attr(
++                    self,
++                    name,
++                    (AttrMutationKind.INSTANCE_DICT, AttrMutationKind.GENERIC_SETATTR),
++                )
++                and not tx.output.side_effects.has_pending_mutation_of_attr(
++                    self, "__dict__", AttrMutationKind.GENERIC_SETATTR
++                )
++                and self.has_key_in_generic_dict(tx, name)
++            ):
++                return variables.ConstantVariable.create(True)
++
+         try:
+             var_vt = self.var_getattr(tx, name)
+             return VariableTracker.build(

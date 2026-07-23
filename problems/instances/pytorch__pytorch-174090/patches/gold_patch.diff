@@ -1,0 +1,17 @@
+diff --git a/torch/_meta_registrations.py b/torch/_meta_registrations.py
+index d8d7bf1792152..de0191b0e7710 100644
+--- a/torch/_meta_registrations.py
++++ b/torch/_meta_registrations.py
+@@ -189,6 +189,12 @@ def meta_take(self, index):
+     return self.new_empty(index.shape)
+ 
+ 
++@register_meta([aten._standard_gamma.default, aten._standard_gamma.out])
++@out_wrapper()
++def meta__standard_gamma(self, generator=None):
++    return torch.empty_like(self)
++
++
+ @register_meta([aten.linalg_cross.default, aten.linalg_cross.out])
+ @out_wrapper()
+ def linalg_cross(self, other, *, dim=-1):

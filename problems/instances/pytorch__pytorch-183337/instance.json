@@ -1,0 +1,46 @@
+{
+  "instance_id": "pytorch__pytorch-183337",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "183261"
+  ],
+  "pull_number": 183337,
+  "base_commit": "ee87363d4f9edcfb23065753dc0110c0de6d1d87",
+  "problem_statement": "`torch.compile` raises InternalTorchDynamoError KeyError(\"class_type\") when constructing a Tensor subclass\n\n### \ud83d\udc1b Describe the bug\n\n`torch.compile` raises an internal Dynamo error when constructing a minimal user-defined `torch.Tensor` subclass inside a compiled function.\n\nEager execution succeeds and returns an instance of the subclass, but the compiled version fails during Dynamo tracing with:\n\n```text\ntorch._dynamo.exc.InternalTorchDynamoError: KeyError: class_type\n```\n\n### Minimal repro\n```python\nimport os\nimport platform\nimport traceback\n\nimport torch\n\n\nclass MyTensor(torch.Tensor):\n    pass\n\n\ndef f(x):\n    y = MyTensor(x)\n    return torch.abs(y)\n\n\ndef print_env():\n    print(\"Python:\", platform.python_version())\n    print(\"Platform:\", platform.platform())\n    print(\"PyTorch:\", torch.__version__)\n    print(\"CUDA available:\", torch.cuda.is_available())\n    print(\"CUDA device count:\", torch.cuda.device_count())\n    print(\"CUDA_VISIBLE_DEVICES:\", os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"\"))\n    if torch.cuda.is_available():\n        print(\"Current CUDA device:\", torch.cuda.current_device())\n        print(\"CUDA device name:\", torch.cuda.get_device_name(0))\n\n\ndef main():\n    print_env()\n\n    if not torch.cuda.is_available():\n        raise RuntimeError(\"This repro expects CUDA.\")\n\n    x = torch.randn(4, device=\"cuda\")\n\n    print(\"\\nRunning eager...\")\n    eager_out = f(x)\n    print(\"Eager succeeded.\")\n    print(\"Eager output type:\", type(eager_out))\n    print(\"Eager output:\", eager_out)\n\n    print(\"\\nRunning compiled...\")\n    compiled_f = torch.compile(\n        f,\n        backend=\"inductor\",\n        fullgraph=True,\n        dynamic=True,\n    )\n\n    try:\n        compiled_out = compiled_f(x)\n        print(\"Compiled succeeded.\")\n        print(\"Compiled output type:\", type(compiled_out))\n        print(\"Compiled output:\", compiled_out)\n        torch.testing.assert_close(\n            torch.as_tensor(eager_out),\n            torch.as_tensor(compiled_out),\n        )\n    except Exception:\n        print(\"Compiled failed:\")\n        traceback.print_exc()\n        raise\n\n\nif __name__ == \"__main__\":\n    main()\n```\n\n### Actual behavior\n\nEager execution succeeds:\n```\nRunning eager...\nEager succeeded.\nEager output type: <class '__main__.MyTensor'>\n```\nCompiled execution fails:\n```\ntorch._dynamo.exc.InternalTorchDynamoError: KeyError: class_type\n\nfrom user code:\n   File \"repro.py\", line 16, in f\n    y = MyTensor(x)\n```\nThe internal stack includes:\n```\nFile \"torch/_dynamo/variables/tensor.py\", line 2585, in call_function\n    var = TensorWithTFOverrideVariable.from_tensor_var(\nFile \"torch/_dynamo/variables/torch_function.py\", line 605, in from_tensor_var\n    input_tensor_type = kwargs.pop(\"class_type\")\nKeyError: class_type\n```\n\n### Versions\n\n```\nPyTorch version:  2.13.0a0+git059c270\nIs debug build: True\nCUDA used to build PyTorch: 12.6\nROCM used to build PyTorch: N/A\n\nOS: Ubuntu 22.04.4 LTS (x86_64)\nGCC version: (Ubuntu 12.3.0-1ubuntu1~22.04) 12.3.0\nClang version: Could not collect\nCMake version: version 3.22.1\nLibc version: glibc-2.35\n\nPython version: 3.10.16 (main, Dec 11 2024, 16:24:50) [GCC 11.2.0] (64-bit runtime)\nPython platform: Linux-6.8.0-59-generic-x86_64-with-glibc2.35\nIs CUDA available: True\n```\n\ncc @ezyang @albanD @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @kadeng @amjames @jataylo @azahed98",
+  "patch": "diff --git a/torch/_dynamo/variables/torch_function.py b/torch/_dynamo/variables/torch_function.py\nindex 3a75188cae62a..bf91ae2316f6f 100644\n--- a/torch/_dynamo/variables/torch_function.py\n+++ b/torch/_dynamo/variables/torch_function.py\n@@ -611,6 +611,7 @@ def from_tensor_var(\n         # TensorWithTFOverrideVariable. In eager, this is just a type change.\n         import torch\n \n+        tensor_var = tensor_var.realize()\n         # This simulates shallow-copying the tensor object.\n         kwargs = dict(tensor_var.__dict__)\n         input_tensor_type = kwargs.pop(\"class_type\")\n",
+  "test_patch": "diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py\nindex fa57e11624465..a5f80992b9792 100644\n--- a/test/dynamo/test_repros.py\n+++ b/test/dynamo/test_repros.py\n@@ -2031,6 +2031,28 @@ def fn(x):\n         self.assertFalse(y.requires_grad)\n         self.assertFalse(z.requires_grad)\n \n+    def test_basic_tensor_subclass_constructor(self):\n+        # Tests that basic Tensor subclass construction works with torch.compile\n+        # Regression test for LazyVariableTracker not being realized before\n+        # accessing __dict__ in TensorWithTFOverrideVariable.from_tensor_var\n+        class MyTensor(torch.Tensor):\n+            pass\n+\n+        def f(x):\n+            y = MyTensor(x)\n+            return torch.abs(y)\n+\n+        x = torch.randn(4)\n+        eager_out = f(x)\n+        compiled_f = torch.compile(f, backend=\"eager\", fullgraph=True, dynamic=True)\n+        compiled_out = compiled_f(x)\n+\n+        torch.testing.assert_close(\n+            torch.as_tensor(eager_out),\n+            torch.as_tensor(compiled_out),\n+        )\n+        self.assertIsInstance(compiled_out, MyTensor)\n+\n     def test_locals_traced_correctly_under_compile(self):\n         def fn(x):\n             if x.dim() > 2:\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_basic_tensor_subclass_constructor"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_312_local_cell_overlap",
+    "test/dynamo/test_repros.py::ReproTests::test_Size",
+    "test/dynamo/test_repros.py::ReproTests::test_abc_setattr",
+    "test/dynamo/test_repros.py::ReproTests::test_add_sub_alpha_out",
+    "test/dynamo/test_repros.py::ReproTests::test_addr_alpha_beta_out",
+    "test/dynamo/test_repros.py::ReproTests::test_amp_foreach_fake_impl",
+    "test/dynamo/test_repros.py::ReproTests::test_aot_autograd_runtime_wrapper_prologue_profiled",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_base_with_mutation_works",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_existing_view_banned",
+    "test/dynamo/test_repros.py::ReproTests::test_attached_attribute_in_dir",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_ctx_stash_no_vc_check",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_graph_break",
+    "test/dynamo/test_repros.py::ReproTests::test_avoid_dupe_specialization",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_encoding_clone_inputs",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_norm_act",
+    "test/dynamo/test_repros.py::ReproTests::test_batchnorm_e2e",
+    "test/dynamo/test_repros.py::ReproTests::test_bigbird_unsqueeze_inplace",
+    "test/dynamo/test_repros.py::ReproTests::test_bitwise_op_guard"
+  ],
+  "test_files": [
+    "test/dynamo/test_repros.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/variables/torch_function.py"
+  ],
+  "created_at": "2026-05-16T01:31:31Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

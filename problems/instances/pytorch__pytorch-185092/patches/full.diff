@@ -1,0 +1,107 @@
+diff --git a/test/export/test_export.py b/test/export/test_export.py
+index 84aa38a0c6050..70b101eb63579 100755
+--- a/test/export/test_export.py
++++ b/test/export/test_export.py
+@@ -7107,6 +7107,26 @@ def forward(self, x):
+                 strict=False,
+             ).graph
+ 
++    def test_export_min_scaled_dynamic_dim(self):
++        class Model(torch.nn.Module):
++            def forward(self, input_ids):
++                seq_len = input_ids.size(1)
++                max_len = min(128 * seq_len, 512 * seq_len)
++                if max_len == 128 * seq_len:
++                    return input_ids.sum()
++                else:
++                    return input_ids.sum()
++
++        input_ids = torch.randn(1, 100)
++        ep = export(
++            Model(),
++            (input_ids,),
++            dynamic_shapes={
++                "input_ids": {1: Dim("text_seq_length", max=2048)},
++            },
++        )
++        self.assertEqual(ep.module()(input_ids), input_ids.sum())
++
+     def test_math_pow(self):
+         class M(torch.nn.Module):
+             def forward(self, x, y):
+diff --git a/test/test_sympy_utils.py b/test/test_sympy_utils.py
+index fcc2d07c8f0df..ba08be1abcc62 100644
+--- a/test/test_sympy_utils.py
++++ b/test/test_sympy_utils.py
+@@ -1003,6 +1003,19 @@ def test_pickle(self):
+         r = pickle.loads(pickle.dumps(x))
+         self.assertEqual(x, r)
+ 
++    def test_min_max_scaled_known_sign_term(self):
++        s = sympy.Symbol("s", positive=True, integer=True)
++        self.assertEqual(TorchSymMin(128 * s, 512 * s), 128 * s)
++        self.assertEqual(TorchSymMax(128 * s, 512 * s), 512 * s)
++
++        z = sympy.Symbol("z", nonpositive=True, integer=True)
++        self.assertEqual(TorchSymMin(128 * z, 512 * z), 512 * z)
++        self.assertEqual(TorchSymMax(128 * z, 512 * z), 128 * z)
++
++        x = sympy.Symbol("x", integer=True)
++        self.assertIsInstance(TorchSymMin(128 * x, 512 * x), TorchSymMin)
++        self.assertIsInstance(TorchSymMax(128 * x, 512 * x), TorchSymMax)
++
+ 
+ class TestSingletonInt(TestCase):
+     def test_basic(self):
+diff --git a/torch/utils/_sympy/functions.py b/torch/utils/_sympy/functions.py
+index d3986a316eb9f..20cc3e1302e79 100644
+--- a/torch/utils/_sympy/functions.py
++++ b/torch/utils/_sympy/functions.py
+@@ -676,6 +676,37 @@ def __new__(cls, *original_args, **assumptions):
+         obj.unique_summations_symbols = unique_summations_symbols
+         return obj
+ 
++    @classmethod
++    def _collapse_known_multiplicative_terms(cls, values):
++        if len(values) != 2:
++            return None
++
++        a, b = values
++        a_coeff, a_term = a.as_coeff_Mul()
++        b_coeff, b_term = b.as_coeff_Mul()
++        if a_term != b_term:
++            return None
++
++        if not (a_coeff.is_comparable and b_coeff.is_comparable):
++            return None
++
++        if a_coeff == b_coeff:
++            return a
++
++        if a_term.is_nonnegative:
++            a_is_smaller = a_coeff < b_coeff
++        elif a_term.is_nonpositive:
++            a_is_smaller = a_coeff > b_coeff
++        else:
++            return None
++
++        if cls is Min:
++            return a if a_is_smaller else b
++        if cls is Max:
++            return b if a_is_smaller else a
++
++        raise AssertionError(f"impossible {cls}")
++
+     @classmethod
+     def _satisfy_unique_summations_symbols(
+         cls, args
+@@ -946,6 +977,9 @@ def _find_localzeros(cls, values, **options):
+ 
+         # Special cases when there is only one symbolic value
+         if num_value is None:
++            collapsed_value = cls._collapse_known_multiplicative_terms(other_values)
++            if collapsed_value is not None:
++                return {collapsed_value}
+             return other_values
+ 
+         if len(other_values) == 0:

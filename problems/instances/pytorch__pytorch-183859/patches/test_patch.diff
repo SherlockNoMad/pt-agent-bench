@@ -1,0 +1,22 @@
+diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py
+index a5f80992b9792..437c9c38ec600 100644
+--- a/test/dynamo/test_repros.py
++++ b/test/dynamo/test_repros.py
+@@ -1486,6 +1486,17 @@ def fn(input_lengths: torch.Tensor, new_ones_1):
+         res = opt_fn(x, y)
+         self.assertTrue(same(ref, res))
+ 
++    def test_integral_inplace_div_aot_eager_raises(self):
++        def fn(x, y):
++            x.div_(y)
++            return x
++
++        opt_fn = torch.compile(fn, backend="aot_eager")
++        with self.assertRaisesRegex(
++            RuntimeError, "can't be cast to the desired output type"
++        ):
++            opt_fn(torch.tensor([1]), torch.tensor([0]))
++
+     @torch._dynamo.config.patch(error_on_recompile=True)
+     @torch.fx.experimental._config.patch(use_duck_shape=False)
+     def test_dynamic_shape_disable_duck_size(self):

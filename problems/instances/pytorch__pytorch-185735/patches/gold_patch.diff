@@ -1,0 +1,34 @@
+diff --git a/torch/_decomp/__init__.py b/torch/_decomp/__init__.py
+index ba044c4b2bc9d..4d14b11e19f73 100644
+--- a/torch/_decomp/__init__.py
++++ b/torch/_decomp/__init__.py
+@@ -397,6 +397,7 @@ def _core_aten_decompositions_post_autograd() -> dict[
+             aten.leaky_relu_backward,
+             aten.lerp,
+             aten.lerp_,
++            aten.linalg_vector_norm,
+             aten.linspace,
+             aten.logaddexp,
+             aten.logaddexp2,
+diff --git a/torch/_refs/linalg/__init__.py b/torch/_refs/linalg/__init__.py
+index 47a42d568eac0..15149f5fbad2d 100644
+--- a/torch/_refs/linalg/__init__.py
++++ b/torch/_refs/linalg/__init__.py
+@@ -163,14 +163,14 @@ def vector_norm(
+     else:
+         # From here on the computation dtype is important as the reduction is non-trivial
+         x = _maybe_convert_to_dtype(x, computation_dtype)  # type: ignore[assignment]
+-        reduce_sum = partial(torch.sum, dim=dim, keepdim=keepdim)
+-
+         is_ord_even = ord % 2 == 0 if isinstance(ord, IntLike) else ord % 2.0 == 0.0
+-        if dim == []:
++        if dim is not None and not isinstance(dim, IntLike) and len(dim) == 0:
+             dim = None
+         elif dim is not None:
+             dim = utils.canonicalize_dims(x.ndim, dim)
+ 
++        reduce_sum = partial(torch.sum, dim=dim, keepdim=keepdim)
++
+         if (dim is None and guard_or_false(x.numel() == 1)) or (
+             dim is not None
+             and (x.ndim > 0 and all(guard_or_false(x.shape[d] == 1) for d in dim))

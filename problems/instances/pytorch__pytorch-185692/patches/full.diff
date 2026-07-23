@@ -1,0 +1,112 @@
+diff --git a/test/test_dynamic_shapes.py b/test/test_dynamic_shapes.py
+index 02d514831e0b4..4b3f54eda9f3e 100644
+--- a/test/test_dynamic_shapes.py
++++ b/test/test_dynamic_shapes.py
+@@ -3793,6 +3793,36 @@ def func(a):
+         with self.assertRaises(RuntimeError):
+             func(torch.tensor([5]))
+ 
++    @torch._dynamo.config.patch("capture_scalar_outputs", True)
++    @parametrize("backend", ["inductor", "eager"])
++    def test_deferred_symfloat_assert(self, backend):
++        @torch.compile(fullgraph=True, backend=backend)
++        def func(a, b):
++            torch._check(b.item() * 2 == 11)
++            return b * 10
++
++        with fresh_cache():
++            self.assertEqual(
++                func(torch.tensor([100]), torch.tensor([5.5])), torch.tensor([55.0])
++            )
++            with self.assertRaisesRegex(RuntimeError, r"Eq\(2\.0\*zuf\d+, 11\.0\)"):
++                func(torch.tensor([5]), torch.tensor([1.8]))
++
++    @torch._dynamo.config.patch("capture_scalar_outputs", True)
++    @parametrize("backend", ["inductor", "eager"])
++    def test_deferred_symfloat_eq_assert(self, backend):
++        @torch.compile(fullgraph=True, backend=backend)
++        def func(a, b):
++            torch._check(b.item() == 5.5)
++            return a * 10
++
++        with fresh_cache():
++            self.assertEqual(
++                func(torch.tensor([5]), torch.tensor([5.5])), torch.tensor([50])
++            )
++            with self.assertRaisesRegex(RuntimeError, r"zuf\d+ >= 5\.5"):
++                func(torch.tensor([100]), torch.tensor([1.5]))
++
+     # Test a situation where we generate a runtime assert i.e: u1==s1, then we specialize s1
+     # later on to a constant.
+     @torch._dynamo.config.patch("capture_scalar_outputs", True)
+diff --git a/torch/fx/experimental/symbolic_shapes.py b/torch/fx/experimental/symbolic_shapes.py
+index 70e2b3e0bf3cd..f3fd0df73fcc6 100644
+--- a/torch/fx/experimental/symbolic_shapes.py
++++ b/torch/fx/experimental/symbolic_shapes.py
+@@ -94,7 +94,7 @@
+ from torch.utils._sympy.printers import CppPrinter, PythonPrinter
+ from torch.utils._sympy.singleton_int import SingletonInt
+ from torch.utils._sympy.solve import try_solve
+-from torch.utils._sympy.symbol import make_symbol, symbol_is_type, SymT
++from torch.utils._sympy.symbol import make_symbol, prefix_str, symbol_is_type, SymT
+ from torch.utils._sympy.value_ranges import (
+     bound_sympy,
+     SymPyValueRangeAnalysis,
+@@ -8744,13 +8744,27 @@ def guard_or_defer_runtime_assert(
+             stack = CapturedTraceback.extract(skip=1)
+             ra = RuntimeAssert(expr, msg, stack)
+ 
+-            # TODO: Do this in a way that is less janky than int(s.name[1:])
++            # TODO: Do this in a way that avoids recovering the symbol's
++            # creation index from its name.
++            def unbacked_symbol_sort_key(s: sympy.Symbol) -> tuple[int, str]:
++                for symbol_type in (SymT.UNBACKED_INT, SymT.UNBACKED_FLOAT):
++                    if symbol_is_type(s, symbol_type):
++                        return (
++                            int(s.name[len(prefix_str[symbol_type]) :]),
++                            prefix_str[symbol_type],
++                        )
++                raise AssertionError(f"expected unbacked symbol, got {s}")
++
+             cands = sorted(
+-                (s for s in expr.free_symbols if symbol_is_type(s, SymT.UNBACKED_INT)),
+-                key=lambda s: int(s.name[1:]),
++                (
++                    s
++                    for s in expr.free_symbols
++                    if symbol_is_type(s, (SymT.UNBACKED_INT, SymT.UNBACKED_FLOAT))
++                ),
++                key=unbacked_symbol_sort_key,
+             )
+             # Is None when prefer_deferred_runtime_asserts_over_guards=True
+-            # and the guard in question has no unbacked SymInts in front
++            # and the guard in question has no unbacked symbols in front
+             ix = cands[-1] if cands else None
+             self.deferred_runtime_asserts.setdefault(ix, []).append(ra)
+             self.axioms.update(dict(self.get_implications(self.simplify(expr))))
+diff --git a/torch/fx/passes/runtime_assert.py b/torch/fx/passes/runtime_assert.py
+index 337eb05f09f27..5c3c17e11302f 100644
+--- a/torch/fx/passes/runtime_assert.py
++++ b/torch/fx/passes/runtime_assert.py
+@@ -555,13 +555,17 @@ def _lower_symint_divisor(d: torch.SymInt) -> fx.Node | int:
+                     # assert and also explicitly refine the range
+                     # (refinement should not be necessary once runtime
+                     # asserts cause refinement, but that's NYI)
+-                    def convert(s: Any) -> int | None:
+-                        if s in (int_oo, -int_oo):
++                    def convert(s: Any) -> int | float | None:
++                        if s in (sympy.oo, -sympy.oo, int_oo, -int_oo):
+                             return None
+                         try:
+-                            return int(s)
+-                        except TypeError:
++                            if vr.is_int:
++                                return int(s)
++                            if vr.is_float:
++                                return float(s)
++                        except (TypeError, OverflowError):
+                             return None
++                        return None
+ 
+                     with _set_node_metadata_hook(
+                         gm,

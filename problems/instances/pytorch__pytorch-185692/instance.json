@@ -1,0 +1,51 @@
+{
+  "instance_id": "pytorch__pytorch-185692",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "151500"
+  ],
+  "pull_number": 185692,
+  "base_commit": "7f3c1ecaff22327486985ad9c188dd1f9986080d",
+  "problem_statement": "deferring unbacked floats runtime assrtions not working !\n\nrepo:\n```\nimport torch\ntorch._dynamo.config.capture_scalar_outputs = True\n@torch.compile(fullgraph=True)\ndef func(a, b):\n    # f \n    torch._check(b.item()*2==11)\n\n    return b*10\n \nwith fresh_inductor_cache():\n    func(torch.tensor([100]), torch.tensor([5.5]))\n    func(torch.tensor([5]), torch.tensor([1.8]))\n\n```\n\n\n\ncc @chauhang @penguinwu",
+  "patch": "diff --git a/torch/fx/experimental/symbolic_shapes.py b/torch/fx/experimental/symbolic_shapes.py\nindex 70e2b3e0bf3cd..f3fd0df73fcc6 100644\n--- a/torch/fx/experimental/symbolic_shapes.py\n+++ b/torch/fx/experimental/symbolic_shapes.py\n@@ -94,7 +94,7 @@\n from torch.utils._sympy.printers import CppPrinter, PythonPrinter\n from torch.utils._sympy.singleton_int import SingletonInt\n from torch.utils._sympy.solve import try_solve\n-from torch.utils._sympy.symbol import make_symbol, symbol_is_type, SymT\n+from torch.utils._sympy.symbol import make_symbol, prefix_str, symbol_is_type, SymT\n from torch.utils._sympy.value_ranges import (\n     bound_sympy,\n     SymPyValueRangeAnalysis,\n@@ -8744,13 +8744,27 @@ def guard_or_defer_runtime_assert(\n             stack = CapturedTraceback.extract(skip=1)\n             ra = RuntimeAssert(expr, msg, stack)\n \n-            # TODO: Do this in a way that is less janky than int(s.name[1:])\n+            # TODO: Do this in a way that avoids recovering the symbol's\n+            # creation index from its name.\n+            def unbacked_symbol_sort_key(s: sympy.Symbol) -> tuple[int, str]:\n+                for symbol_type in (SymT.UNBACKED_INT, SymT.UNBACKED_FLOAT):\n+                    if symbol_is_type(s, symbol_type):\n+                        return (\n+                            int(s.name[len(prefix_str[symbol_type]) :]),\n+                            prefix_str[symbol_type],\n+                        )\n+                raise AssertionError(f\"expected unbacked symbol, got {s}\")\n+\n             cands = sorted(\n-                (s for s in expr.free_symbols if symbol_is_type(s, SymT.UNBACKED_INT)),\n-                key=lambda s: int(s.name[1:]),\n+                (\n+                    s\n+                    for s in expr.free_symbols\n+                    if symbol_is_type(s, (SymT.UNBACKED_INT, SymT.UNBACKED_FLOAT))\n+                ),\n+                key=unbacked_symbol_sort_key,\n             )\n             # Is None when prefer_deferred_runtime_asserts_over_guards=True\n-            # and the guard in question has no unbacked SymInts in front\n+            # and the guard in question has no unbacked symbols in front\n             ix = cands[-1] if cands else None\n             self.deferred_runtime_asserts.setdefault(ix, []).append(ra)\n             self.axioms.update(dict(self.get_implications(self.simplify(expr))))\ndiff --git a/torch/fx/passes/runtime_assert.py b/torch/fx/passes/runtime_assert.py\nindex 337eb05f09f27..5c3c17e11302f 100644\n--- a/torch/fx/passes/runtime_assert.py\n+++ b/torch/fx/passes/runtime_assert.py\n@@ -555,13 +555,17 @@ def _lower_symint_divisor(d: torch.SymInt) -> fx.Node | int:\n                     # assert and also explicitly refine the range\n                     # (refinement should not be necessary once runtime\n                     # asserts cause refinement, but that's NYI)\n-                    def convert(s: Any) -> int | None:\n-                        if s in (int_oo, -int_oo):\n+                    def convert(s: Any) -> int | float | None:\n+                        if s in (sympy.oo, -sympy.oo, int_oo, -int_oo):\n                             return None\n                         try:\n-                            return int(s)\n-                        except TypeError:\n+                            if vr.is_int:\n+                                return int(s)\n+                            if vr.is_float:\n+                                return float(s)\n+                        except (TypeError, OverflowError):\n                             return None\n+                        return None\n \n                     with _set_node_metadata_hook(\n                         gm,\n",
+  "test_patch": "diff --git a/test/test_dynamic_shapes.py b/test/test_dynamic_shapes.py\nindex 02d514831e0b4..4b3f54eda9f3e 100644\n--- a/test/test_dynamic_shapes.py\n+++ b/test/test_dynamic_shapes.py\n@@ -3793,6 +3793,36 @@ def func(a):\n         with self.assertRaises(RuntimeError):\n             func(torch.tensor([5]))\n \n+    @torch._dynamo.config.patch(\"capture_scalar_outputs\", True)\n+    @parametrize(\"backend\", [\"inductor\", \"eager\"])\n+    def test_deferred_symfloat_assert(self, backend):\n+        @torch.compile(fullgraph=True, backend=backend)\n+        def func(a, b):\n+            torch._check(b.item() * 2 == 11)\n+            return b * 10\n+\n+        with fresh_cache():\n+            self.assertEqual(\n+                func(torch.tensor([100]), torch.tensor([5.5])), torch.tensor([55.0])\n+            )\n+            with self.assertRaisesRegex(RuntimeError, r\"Eq\\(2\\.0\\*zuf\\d+, 11\\.0\\)\"):\n+                func(torch.tensor([5]), torch.tensor([1.8]))\n+\n+    @torch._dynamo.config.patch(\"capture_scalar_outputs\", True)\n+    @parametrize(\"backend\", [\"inductor\", \"eager\"])\n+    def test_deferred_symfloat_eq_assert(self, backend):\n+        @torch.compile(fullgraph=True, backend=backend)\n+        def func(a, b):\n+            torch._check(b.item() == 5.5)\n+            return a * 10\n+\n+        with fresh_cache():\n+            self.assertEqual(\n+                func(torch.tensor([5]), torch.tensor([5.5])), torch.tensor([50])\n+            )\n+            with self.assertRaisesRegex(RuntimeError, r\"zuf\\d+ >= 5\\.5\"):\n+                func(torch.tensor([100]), torch.tensor([1.5]))\n+\n     # Test a situation where we generate a runtime assert i.e: u1==s1, then we specialize s1\n     # later on to a constant.\n     @torch._dynamo.config.patch(\"capture_scalar_outputs\", True)\n",
+  "FAIL_TO_PASS": [
+    "test/test_dynamic_shapes.py::TestUnbacked::test_deferred_symfloat_assert_backend_inductor",
+    "test/test_dynamic_shapes.py::TestUnbacked::test_deferred_symfloat_eq_assert_backend_eager",
+    "test/test_dynamic_shapes.py::TestUnbacked::test_deferred_symfloat_eq_assert_backend_inductor"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_dynamic_shapes.py::TestPySymInt::test_arith_ops",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_aten_ops",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_avg_pool1d_unbacked_symint",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_avg_pool2d_unbacked_symint",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_avg_pool3d_unbacked_symint",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_avoid_unbacked_substitution",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_backed_size_oblivious_01_spec",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_baddbmm_symint",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_binary",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_build_proxy_for_nary_min_max",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_build_proxy_for_optimized_add",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_data_dependent_guard",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_data_dependent_guard_propagate_real_tensors",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_debug_has_internal_overlap_unbacked",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_deepcopy",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_duck_shape",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_ephemeral_source_simplification",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_ephemeral_source_unified_with_non_ephemeral_source",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_expect_true_basic",
+    "test/test_dynamic_shapes.py::TestPySymInt::test_expect_true_double_digits"
+  ],
+  "test_files": [
+    "test/test_dynamic_shapes.py"
+  ],
+  "fix_files": [
+    "torch/fx/experimental/symbolic_shapes.py",
+    "torch/fx/passes/runtime_assert.py"
+  ],
+  "created_at": "2026-06-07T23:04:54Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": true
+  }
+}

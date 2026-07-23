@@ -1,0 +1,17 @@
+diff --git a/torch/fx/passes/utils/source_matcher_utils.py b/torch/fx/passes/utils/source_matcher_utils.py
+index ab0b372ee27a1..3645518d4db81 100644
+--- a/torch/fx/passes/utils/source_matcher_utils.py
++++ b/torch/fx/passes/utils/source_matcher_utils.py
+@@ -148,9 +148,9 @@ def make_partition(nodes: list[Node], module_type: type) -> SourcePartition:
+         return SourcePartition(
+             nodes,
+             module_type,
+-            list(input_nodes),
+-            list(output_nodes),
+-            list(params),  # type: ignore[arg-type]
++            sorted(input_nodes),
++            sorted(output_nodes),
++            sorted(params),  # type: ignore[arg-type]
+         )
+ 
+     ret: dict[type[Any], list[SourcePartition]] = {}

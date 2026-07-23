@@ -1,0 +1,44 @@
+{
+  "instance_id": "pytorch__pytorch-183839",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "183835"
+  ],
+  "pull_number": 183839,
+  "base_commit": "8f497e7fc94b92a7f6ae0ffc078a15ea69071731",
+  "problem_statement": "[FakeTensor] Trace metadata should serialize hinted symbolic storage sizes as concrete hinted values\n\n## Summary\n\nFakeTensor trace metadata serializes hinted symbolic storage sizes as symbolic strings, even when an explicit optimization hint provides a concrete runtime extent for trace tooling.\n\nFor example, a storage size like `3 * u0` is emitted as the string `\"3*u0\"`. Trace consumers that expect the storage size field to be numeric cannot parse that value, even though the `ShapeEnv` has a hint for `u0`.\n\n## Reproducer\n\n```python\nimport json\nimport torch\nfrom torch._subclasses.meta_utils import MetaStorageDesc, MetaStorageId\nfrom torch.fx.experimental.symbolic_shapes import ShapeEnv\n\n\nshape_env = ShapeEnv()\nsize = shape_env.create_unbacked_symint()\ntorch._dynamo.override_optimization_hint(size, 16)\n\nmetadata = MetaStorageDesc(MetaStorageId(0), 3 * size, None).as_json(1)\nprint(json.dumps(metadata, indent=2, default=str))\n\n# Stand-in for trace consumers that need a numeric storage size.\nif not isinstance(metadata[\"size\"], int):\n    raise TypeError(f\"storage size must be numeric, got {metadata['size']!r}\")\n```\n\n## Expected behavior\n\nWhen the storage size is symbolic but has an optimization hint, trace metadata should serialize a concrete numeric storage size derived from the hint. Tensor shapes and runtime semantics should remain symbolic; this is only trace metadata serialization.\n\nFor the repro above, `metadata[\"size\"]` should be `48`.\n\n## Actual behavior\n\nThe metadata can contain a symbolic string such as:\n\n```json\n{\n  \"id\": 0,\n  \"describer_id\": 1,\n  \"size\": \"3*u0\"\n}\n```\n\nA consumer requiring a numeric storage size then fails with:\n\n```text\nTypeError: storage size must be numeric, got '3*u0'\n```\n\n## Suggested fix\n\nWhen serializing `MetaStorageDesc` to JSON, use `optimization_hint(size, fallback=None)` for `torch.SymInt` storage sizes. Preserve the existing integer behavior for concrete sizes and the existing repr fallback for non-SymInt non-integer values.\n\n\ncc @chauhang @penguinwu @eellison @aorenste @bdhirsh @bobrenjc93",
+  "patch": "diff --git a/torch/_subclasses/meta_utils.py b/torch/_subclasses/meta_utils.py\nindex b1192528c4ab8..c05909a5a8bb8 100644\n--- a/torch/_subclasses/meta_utils.py\n+++ b/torch/_subclasses/meta_utils.py\n@@ -528,11 +528,19 @@ class MetaStorageDesc:\n     data: torch.UntypedStorage | None\n \n     def as_json(self, describer_id: _DescriberId) -> dict[str, object]:\n-        return {\n+        metadata: dict[str, object] = {\n             \"id\": self.id,\n             \"describer_id\": describer_id,\n             \"size\": self.size if isinstance(self.size, int) else repr(self.size),\n         }\n+        if isinstance(self.size, torch.SymInt):\n+            node = self.size.node\n+            free_symbols = node.expr.free_symbols\n+            if free_symbols and all(\n+                symbol in node.shape_env.var_to_hint_override for symbol in free_symbols\n+            ):\n+                metadata[\"size_hint\"] = node.shape_env.optimization_hint(node.expr)\n+        return metadata\n \n \n @dataclass(frozen=True)\n",
+  "test_patch": "diff --git a/test/test_fake_tensor.py b/test/test_fake_tensor.py\nindex d8922cffacabc..cac67626f2746 100644\n--- a/test/test_fake_tensor.py\n+++ b/test/test_fake_tensor.py\n@@ -1365,6 +1365,17 @@ def test_view_unbacked_contiguous_relation_from_hints(self):\n         self.assertEqual(out.shape, (4 * 2 * (seq // 2), 256))\n         self.assertTrue(free_unbacked_symbols(out.shape[0]))\n \n+    def test_meta_storage_trace_uses_hint_for_symbolic_size(self):\n+        from torch._subclasses.meta_utils import MetaStorageDesc, MetaStorageId\n+\n+        shape_env = ShapeEnv()\n+        size = shape_env.create_unbacked_symint()\n+        torch._dynamo.override_optimization_hint(size, 16)\n+\n+        metadata = MetaStorageDesc(MetaStorageId(0), 3 * size, None).as_json(1)\n+        self.assertEqual(metadata[\"size\"], \"3*u0\")\n+        self.assertEqual(metadata[\"size_hint\"], 48)\n+\n     def test_matmul_rank4_unbacked_batch_dim(self):\n         fake_mode, (q, k) = self.fake_with_unbacked_batch(\n             torch.randn(4, 2, 8, 16),\n",
+  "FAIL_TO_PASS": [
+    "test/test_fake_tensor.py::FakeTensorTest::test_meta_storage_trace_uses_hint_for_symbolic_size",
+    "test/test_fake_tensor.py::PropagateRealTensorsFakeTensorTest::test_meta_storage_trace_uses_hint_for_symbolic_size_propagate_real_tensors"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_fake_tensor.py::FakeTensorTest::test__adaptive_avg_pool2d_backward",
+    "test/test_fake_tensor.py::FakeTensorTest::test_alias_call",
+    "test/test_fake_tensor.py::FakeTensorTest::test_allow_meta",
+    "test/test_fake_tensor.py::FakeTensorTest::test_as_strided_negative_stride_error",
+    "test/test_fake_tensor.py::FakeTensorTest::test_avoid_device_init_with_privateuse1_backend_is_available_False",
+    "test/test_fake_tensor.py::FakeTensorTest::test_avoid_device_init_with_privateuse1_backend_is_available_True",
+    "test/test_fake_tensor.py::FakeTensorTest::test_avoid_device_init_without_backends",
+    "test/test_fake_tensor.py::FakeTensorTest::test_basic",
+    "test/test_fake_tensor.py::FakeTensorTest::test_batch_tensor",
+    "test/test_fake_tensor.py::FakeTensorTest::test_binary_op_type_promotion",
+    "test/test_fake_tensor.py::FakeTensorTest::test_check_for_subclass_arg_parameter_subclass",
+    "test/test_fake_tensor.py::FakeTensorTest::test_compare_tensor_meta_unbacked_numel",
+    "test/test_fake_tensor.py::FakeTensorTest::test_constructor",
+    "test/test_fake_tensor.py::FakeTensorTest::test_conv_nhwc",
+    "test/test_fake_tensor.py::FakeTensorTest::test_convert_fake_to_real"
+  ],
+  "test_files": [
+    "test/test_fake_tensor.py"
+  ],
+  "fix_files": [
+    "torch/_subclasses/meta_utils.py"
+  ],
+  "created_at": "2026-06-10T15:15:35Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

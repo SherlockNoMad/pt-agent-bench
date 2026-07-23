@@ -1,0 +1,205 @@
+diff --git a/torch/_dynamo/variables/builder.py b/torch/_dynamo/variables/builder.py
+index d1eef49682302..0b06f51b3d3a8 100644
+--- a/torch/_dynamo/variables/builder.py
++++ b/torch/_dynamo/variables/builder.py
+@@ -4310,6 +4310,9 @@ def _automatic_dynamic(
+             tensor_source=outer_context.tensor_source,
+             shape_env_to_source_to_symbol_cache=outer_context.shape_env_to_source_to_symbol_cache,
+             inner_contexts=inner_contexts,
++            track_outer_size_stride=not isinstance(
++                e, torch.nested._internal.nested_tensor.NestedTensor
++            ),
+         )
+ 
+     # We preserve the dynamism of inputs. For example, when users call
+diff --git a/torch/fx/experimental/symbolic_shapes.py b/torch/fx/experimental/symbolic_shapes.py
+index 2d1637a1c3155..b96130612489c 100644
+--- a/torch/fx/experimental/symbolic_shapes.py
++++ b/torch/fx/experimental/symbolic_shapes.py
+@@ -2363,6 +2363,7 @@ class SubclassSymbolicContext(StatefulSymbolicContext):
+     """
+ 
+     inner_contexts: dict[str, SymbolicContext] = field(default_factory=dict)
++    track_outer_size_stride: bool = True
+ 
+ 
+ @dataclass(slots=True)
+@@ -6160,6 +6161,14 @@ def hint(s: sympy.Expr) -> str:
+                         constraint.warn_only, self._debug_name(source), msg
+                     )
+ 
++        def track_singletonint_source(source: Source, val: IntLikeType) -> None:
++            if isinstance(val, SymInt) and is_symbolic(val):
++                s = val.node.expr
++                if isinstance(s, sympy.Symbol) and isinstance(
++                    self.backed_var_to_val.get(s), SingletonInt
++                ):
++                    symbol_to_source[s].append(source)
++
+         def track_symfloat(source: Source, val: FloatLikeType) -> None:
+             log.debug("track_symfloat %s %s", LazyString(lambda: source.name), val)
+             if isinstance(val, SymFloat) and not is_symbolic(val):
+@@ -6206,12 +6215,31 @@ def track_symfloat(source: Source, val: FloatLikeType) -> None:
+                         f"Expected SubclassSymbolicContext, got {type(context)}"
+                     )
+ 
+-                # For subclasses, we need to track symints on BOTH the outer
+-                # and inner tensors.
++                # For most subclasses, we need to track symints on BOTH the
++                # outer and inner tensors.  Some wrapper subclasses expose an
++                # outer size/stride that is fully derived from inner tensors
++                # and metadata; for those, the outer guards are redundant and
++                # can be costly to evaluate on small compiled graphs.
+                 # TODO: type this better
+-                sources_tensors_constraints: list[tuple[Source, Any, Any, Any]] = [
+-                    (source, t, context.constraint_sizes, context.constraint_strides)
+-                ]
++                sources_tensors_constraints: list[tuple[Source, Any, Any, Any]] = []
++                if context.track_outer_size_stride:
++                    sources_tensors_constraints.append(
++                        (
++                            source,
++                            t,
++                            context.constraint_sizes,
++                            context.constraint_strides,
++                        )
++                    )
++                else:
++                    for i, ss in enumerate(t.size()):
++                        track_singletonint_source(
++                            TensorPropertySource(source, TensorProperty.SIZE, i), ss
++                        )
++                    for i, ss in enumerate(t.stride()):
++                        track_singletonint_source(
++                            TensorPropertySource(source, TensorProperty.STRIDE, i), ss
++                        )
+                 attrs, _ = t.__tensor_flatten__()
+                 for attr in attrs:
+                     match getattr(t, attr):
+diff --git a/torch/nested/_internal/nested_tensor.py b/torch/nested/_internal/nested_tensor.py
+index 2efb370f2418f..3cb2517e9c7e3 100644
+--- a/torch/nested/_internal/nested_tensor.py
++++ b/torch/nested/_internal/nested_tensor.py
+@@ -1,9 +1,10 @@
+ # mypy: allow-untyped-defs
++import math
+ from typing import *  # noqa: F403
+ 
+ import torch
+ from torch._C import DispatchKey, DispatchKeySet
+-from torch._prims_common import is_expandable_to
++from torch._prims_common import canonicalize_dim, is_expandable_to
+ from torch.nested._internal.nested_int import NestedIntNode
+ from torch.utils.weak import WeakTensorKeyDictionary
+ 
+@@ -45,6 +46,23 @@ def _load_val_from_tensor(t: torch.Tensor):
+     return t.shape[0]
+ 
+ 
++def _jagged_numel(inp, func):
++    if inp._lengths is None:
++        return inp._values.numel()
++
++    fixed_shape = (*inp._size[1 : inp._ragged_idx], *inp._size[inp._ragged_idx + 1 :])
++    fixed_numel = math.prod(fixed_shape)
++
++    from torch._subclasses.fake_tensor import DynamicOutputShapeException, is_fake
++    from torch._subclasses.functional_tensor import mb_unwrap_functional_tensor
++
++    lengths = mb_unwrap_functional_tensor(inp._lengths)
++    if is_fake(lengths):
++        raise DynamicOutputShapeException(func)
++
++    return int(inp._lengths.sum().item()) * fixed_numel
++
++
+ # serialization function must be defined at top level
+ def _rebuild_njt(constructor_kwargs):
+     return NestedTensor(**constructor_kwargs)
+@@ -357,6 +375,23 @@ def __torch_dispatch__(cls, func, types, args=(), kwargs=None):  # type: ignore[
+         # size = -1, see note: [NJT outer_size in AOTDispatcher]
+         kwargs = {} if kwargs is None else kwargs
+ 
++        if args and isinstance(args[0], NestedTensor) and len(args) == 1 and not kwargs:
++            inp = args[0]
++            if func is torch.ops.aten.is_non_overlapping_and_dense.default:
++                return False
++            if func is torch.ops.aten.sym_size.default:
++                return inp._size
++            if func is torch.ops.aten.dim.default:
++                return len(inp._size)
++            if func in (torch.ops.aten.sym_numel.default, torch.ops.aten.numel.default):
++                return _jagged_numel(inp, func)
++            if func is torch.ops.aten.sym_stride.default:
++                return inp._strides
++            if func is torch.ops.aten.sym_storage_offset.default:
++                return inp._values.storage_offset()
++            if func is torch.ops.prim.layout.default:
++                return torch.jagged
++
+         # Lazy import to avoid circular dependency
+         from .ops import lookup_jagged
+ 
+@@ -385,6 +420,31 @@ def __torch_function__(cls, func, types, args=(), kwargs=None):
+         if kwargs is None:
+             kwargs = {}
+ 
++        if args and isinstance(args[0], NestedTensor):
++            inp = args[0]
++            if (
++                (func is torch.Tensor.size or func is torch.Tensor.stride)
++                and len(args) <= 2
++                and (not kwargs or set(kwargs) == {"dim"})
++            ):
++                dim = kwargs.get("dim", args[1] if len(args) == 2 else None)
++                data = inp._size if func is torch.Tensor.size else inp._strides
++                if dim is None:
++                    return torch.Size(data) if func is torch.Tensor.size else data
++                return data[canonicalize_dim(len(data), dim)]
++            if func is torch.Tensor.dim and len(args) == 1 and not kwargs:
++                return len(inp._size)
++            if (
++                getattr(func, "__name__", None) == "__get__"
++                and len(args) == 1
++                and not kwargs
++            ):
++                descriptor = getattr(func, "__self__", None)
++                if descriptor is torch.Tensor.shape:
++                    return torch.Size(inp._size)
++                if descriptor is torch.Tensor.ndim:
++                    return len(inp._size)
++
+         from torch.fx.experimental.proxy_tensor import maybe_enable_thunkify
+ 
+         from .ops import jagged_torch_function
+diff --git a/torch/nested/_internal/ops.py b/torch/nested/_internal/ops.py
+index f5eee4185ff98..55f31958a5924 100644
+--- a/torch/nested/_internal/ops.py
++++ b/torch/nested/_internal/ops.py
+@@ -1,6 +1,5 @@
+ # mypy: allow-untyped-defs
+ import functools
+-import math
+ import operator
+ from typing import *  # noqa: F403
+ 
+@@ -9,7 +8,7 @@
+ from torch.fx.operator_schemas import normalize_function
+ from torch.nested._internal.sdpa import jagged_scaled_dot_product_attention
+ 
+-from .nested_tensor import NestedTensor
++from .nested_tensor import _jagged_numel, NestedTensor
+ 
+ 
+ __all__: list[Any] = []
+@@ -508,9 +507,7 @@ def tensor_attr_supported_getter(func, *args, **kwargs):
+         return len(args[0]._size)
+ 
+     if func in (torch.ops.aten.sym_numel.default, torch.ops.aten.numel.default):
+-        if args[0]._lengths is not None:
+-            return int(sum(args[0]._lengths) * math.prod(args[0]._size[2:]))
+-        return args[0]._values.numel()
++        return _jagged_numel(args[0], func)
+ 
+     if func is torch.ops.aten.sym_stride.default:
+         return args[0]._strides

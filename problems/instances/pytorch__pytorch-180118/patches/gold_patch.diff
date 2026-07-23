@@ -1,0 +1,13 @@
+diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py
+index 1a78e0aa7b495..8d58ffa8e355f 100644
+--- a/torch/_dynamo/trace_rules.py
++++ b/torch/_dynamo/trace_rules.py
+@@ -220,6 +220,8 @@
+     "torch.manual_seed": SkipFunctionVariable,
+     # https://github.com/pytorch/pytorch/issues/93501
+     "torch.nn.utils.rnn.pack_padded_sequence": SkipFunctionVariable,
++    # https://github.com/pytorch/pytorch/issues/178260
++    "torch.nn.utils.rnn.pad_packed_sequence": SkipFunctionVariable,
+     "torch.nn.Parameter": TorchInGraphFunctionVariable,
+     "torch.nn.Buffer": TorchInGraphFunctionVariable,
+     "torch._nested_tensor_from_mask": SkipFunctionVariable,

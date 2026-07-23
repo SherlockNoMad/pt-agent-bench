@@ -1,0 +1,49 @@
+{
+  "instance_id": "pytorch__pytorch-185298",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "161081"
+  ],
+  "pull_number": 185298,
+  "base_commit": "3d748a878b849c3a73b81e8656eeab834bb08db4",
+  "problem_statement": "torch.ops.aten.hardtanh should raise an exception when min > max\n\n### \ud83d\udd75\ufe0f\u200d\u2642\ufe0f Detected with [FACTO](https://github.com/meta-pytorch/FACTO)\n\n### \ud83d\udc1b Describe the bug\n\nThe ATen op succeeds but torch.export fails.\nWe should either raise this error in the ATen op as well, or allow it when exporting\n\n```python\nimport torch\nimport torch.nn as nn\n\nclass HardtanhModel(nn.Module):\n    def __init__(self):\n        super(HardtanhModel, self).__init__()\n\n    def forward(self, x):\n        return torch.ops.aten.hardtanh(x, min_val=2, max_val=0)\n\nmodel = HardtanhModel()\nx = torch.ones([3])\n\n# this succeeds\nmodel(x)\n\n# this fails\n# ValueError: min_val cannot be greater than max_val\ntorch.export.export(model, (x,))\n```\n\n### Versions\n\nnightly\n\ncc @malfet @albanD @chauhang @penguinwu @avikchaudhuri @gmagogsfm @zhxchen17 @tugsbayasgalan @angelayi @suo @ydwu4",
+  "patch": "diff --git a/torch/_refs/nn/functional/__init__.py b/torch/_refs/nn/functional/__init__.py\nindex 20b999cf4e06f..d4a1447967f5f 100644\n--- a/torch/_refs/nn/functional/__init__.py\n+++ b/torch/_refs/nn/functional/__init__.py\n@@ -1029,23 +1029,14 @@ def _triplet_margin_with_distance_loss(\n     return _apply_loss_reduction(loss, reduction)\n \n \n-@register_decomposition(aten.hardtanh)\n-@_inplace_wrapper\n-@out_wrapper()\n-@elementwise_unary_scalar_wrapper\n-@elementwise_type_promotion_wrapper(\n-    type_promoting_args=(\"a\"),\n-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,\n-)\n-def hardtanh(\n+def _hardtanh(\n     a: TensorLikeType,\n     min_val: NumberType = -1,\n     max_val: NumberType = 1,\n     inplace: bool = False,\n+    *,\n+    check_bounds: bool,\n ) -> TensorLikeType:\n-    \"\"\"\n-    Reference implementation of torch.nn.functional.hardtanh\n-    \"\"\"\n     if inplace:\n         raise NotImplementedError\n     if utils.is_boolean_dtype(a.dtype):\n@@ -1060,12 +1051,52 @@ def hardtanh(\n                 \"Cannot do hardtanh on an unsigned type with negative limits\"\n             )\n \n-    if min_val > max_val:  # type: ignore[operator]\n+    if check_bounds and min_val > max_val:  # type: ignore[operator]\n         raise ValueError(\"min_val cannot be greater than max_val\")\n \n     return torch.clamp(a, min_val, max_val)  # type: ignore[arg-type]\n \n \n+@register_decomposition([aten.hardtanh.default, aten.hardtanh.out])\n+@_inplace_wrapper\n+@out_wrapper()\n+@elementwise_unary_scalar_wrapper\n+@elementwise_type_promotion_wrapper(\n+    type_promoting_args=(\"a\"),\n+    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,\n+)\n+def _aten_hardtanh(\n+    a: TensorLikeType,\n+    min_val: NumberType = -1,\n+    max_val: NumberType = 1,\n+    inplace: bool = False,\n+) -> TensorLikeType:\n+    return _hardtanh(\n+        a, min_val=min_val, max_val=max_val, inplace=inplace, check_bounds=False\n+    )\n+\n+\n+@_inplace_wrapper\n+@out_wrapper()\n+@elementwise_unary_scalar_wrapper\n+@elementwise_type_promotion_wrapper(\n+    type_promoting_args=(\"a\"),\n+    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,\n+)\n+def hardtanh(\n+    a: TensorLikeType,\n+    min_val: NumberType = -1,\n+    max_val: NumberType = 1,\n+    inplace: bool = False,\n+) -> TensorLikeType:\n+    \"\"\"\n+    Reference implementation of torch.nn.functional.hardtanh\n+    \"\"\"\n+    return _hardtanh(\n+        a, min_val=min_val, max_val=max_val, inplace=inplace, check_bounds=True\n+    )\n+\n+\n @register_decomposition(aten.gelu)\n @out_wrapper()\n @elementwise_unary_scalar_wrapper\n",
+  "test_patch": "diff --git a/test/export/test_export.py b/test/export/test_export.py\nindex 0e9bdbfe48bdc..2bbe98936ef22 100755\n--- a/test/export/test_export.py\n+++ b/test/export/test_export.py\n@@ -1473,6 +1473,23 @@ def forward(self, x):\n         inp = torch.randint(0, 8, (5,), dtype=torch.int64)\n         self.assertTrue(torch.allclose(ep.module()(inp), M()(inp)))\n \n+    def test_export_allows_aten_hardtanh_with_inverted_bounds(self):\n+        class M(torch.nn.Module):\n+            def forward(self, x):\n+                return torch.ops.aten.hardtanh(x, min_val=2, max_val=0)\n+\n+        model = M()\n+        x = torch.randn(3)\n+        ep = export(model, (x,), strict=True)\n+        self.assertEqual(ep.module()(x), model(x))\n+        self.assertTrue(\n+            any(\n+                node.op == \"call_function\"\n+                and node.target == torch.ops.aten.hardtanh.default\n+                for node in ep.graph_module.graph.nodes\n+            )\n+        )\n+\n     def test_symint_output(self):\n         class Foo(torch.nn.Module):\n             def forward(self, x):\ndiff --git a/test/test_ops.py b/test/test_ops.py\nindex d494061e20490..580ae09ed2077 100644\n--- a/test/test_ops.py\n+++ b/test/test_ops.py\n@@ -2560,6 +2560,9 @@ class TestRefsOpsInfo(TestCase):\n         \"_refs.nn.functional.poisson_nll_loss\",\n         \"_refs.nn.functional.softmax\",\n         \"_refs.nn.functional.softmin\",\n+        # The frontend ref validates min_val <= max_val, but aten.hardtanh\n+        # preserves native ATen semantics and allows inverted bounds.\n+        \"_refs.nn.functional.hardtanh\",\n         \"_refs.positive\",\n         \"_refs.ravel\",\n         \"_refs.reshape\",\n",
+  "FAIL_TO_PASS": [
+    "test/export/test_export.py::TestExport::test_export_allows_aten_hardtanh_with_inverted_bounds"
+  ],
+  "PASS_TO_PASS": [
+    "test/export/test_export.py::TestDynamismExpression::test_export_assume_static_by_default",
+    "test/export/test_export.py::TestDynamismExpression::test_export_constraints_error",
+    "test/export/test_export.py::TestDynamismExpression::test_export_constraints_error_not_in_range",
+    "test/export/test_export.py::TestDynamismExpression::test_export_inline_constraints",
+    "test/export/test_export.py::TestDynamismExpression::test_export_slice_maxsize",
+    "test/export/test_export.py::TestDynamismExpression::test_export_slice_unbacked_dim1",
+    "test/export/test_export.py::TestDynamismExpression::test_export_strict_narrow_unbacked_expr",
+    "test/export/test_export.py::TestDynamismExpression::test_no_grad_param_inplace",
+    "test/export/test_export.py::TestDynamismExpression::test_reshape_view_backed_size_oblivious",
+    "test/export/test_export.py::TestDynamismExpression::test_view_unify_cross_symbols",
+    "test/export/test_export.py::TestExport::test__scaled_dot_product_flash_attention",
+    "test/export/test_export.py::TestExport::test_additional_inputs_constants",
+    "test/export/test_export.py::TestExport::test_allow_explicit_guards_as_runtime_asserts",
+    "test/export/test_export.py::TestExport::test_annotate_on_assert",
+    "test/export/test_export.py::TestExport::test_aot_export_buffer_assignment_hook_cleanup_after_failed_export",
+    "test/export/test_export.py::TestExport::test_args_type_checked",
+    "test/export/test_export.py::TestExport::test_aten_lift_fresh_copy",
+    "test/export/test_export.py::TestExport::test_attention",
+    "test/export/test_export.py::TestExport::test_attr_assignment_extra",
+    "test/export/test_export.py::TestExport::test_automatic_constrain_size"
+  ],
+  "test_files": [
+    "test/export/test_export.py",
+    "test/test_ops.py"
+  ],
+  "fix_files": [
+    "torch/_refs/nn/functional/__init__.py"
+  ],
+  "created_at": "2026-06-02T20:05:50Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

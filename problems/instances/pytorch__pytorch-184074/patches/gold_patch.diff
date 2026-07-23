@@ -1,0 +1,151 @@
+diff --git a/torch/_dynamo/utils.py b/torch/_dynamo/utils.py
+index 27ca3bd701127..1b834d5a76b0e 100644
+--- a/torch/_dynamo/utils.py
++++ b/torch/_dynamo/utils.py
+@@ -4563,6 +4563,76 @@ def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> Any:
+         return numpy_to_tensor(out)
+ 
+ 
++@functools.lru_cache(maxsize=1)
++def _torch_numpy_callable_id_map() -> dict[int, tuple[Callable[..., Any], Any]]:
++    from torch._dynamo.variables.misc import get_tnp_to_np_map
++
++    return {
++        id(tnp_callable): (tnp_callable, np_callable)
++        for tnp_callable, np_callable in get_tnp_to_np_map().items()
++    }
++
++
++@functools.lru_cache(maxsize=1024)
++def _torch_numpy_callable_cache_key_by_id(
++    obj_id: int,
++) -> tuple[Callable[..., Any], str] | None:
++    tnp_callable, np_callable = _torch_numpy_callable_id_map()[obj_id]
++    if np_callable is None:
++        return None
++
++    module = getattr(np_callable, "__module__", None) or "numpy"
++    # Random functions depend on global RNG state, so they are not safe to
++    # identify only by their canonical NumPy path in an AOTAutograd cache key.
++    if module == "numpy.random" or module.startswith("numpy.random."):
++        return None
++
++    name = getattr(np_callable, "__name__", None)
++    if name is None:
++        return None
++
++    try:
++        if np_callable is not getattr(importlib.import_module(module), name):
++            return None
++    except (AttributeError, ImportError):
++        return None
++
++    return (tnp_callable, f"{module}.{name}")
++
++
++def _torch_numpy_callable_cache_key(obj: Callable[..., Any]) -> str | None:
++    obj_id = id(obj)
++    # Arbitrary Python callables can be short-lived, so do not cache misses by
++    # id; a later object may reuse the same id.
++    if obj_id not in _torch_numpy_callable_id_map():
++        return None
++
++    entry = _torch_numpy_callable_cache_key_by_id(obj_id)
++    if entry is None:
++        return None
++
++    tnp_callable, cache_key = entry
++    if obj is not tnp_callable:
++        return None
++
++    return cache_key
++
++
++def is_safe_numpy_wrapper(obj: Any) -> bool:
++    return numpy_wrapper_cache_key(obj) is not None
++
++
++def numpy_wrapper_cache_key(obj: Any) -> tuple[str, str] | None:
++    if type(obj) is not numpy_to_tensor_wrapper:
++        return None
++
++    key = _torch_numpy_callable_cache_key(obj.f)
++    if key is None:
++        return None
++
++    return (type(obj).__qualname__, key)
++
++
+ def defake(x: Any) -> Any:
+     if not isinstance(x, FakeTensor):
+         return x
+diff --git a/torch/_functorch/_aot_autograd/autograd_cache.py b/torch/_functorch/_aot_autograd/autograd_cache.py
+index a6f495b492fba..03abc51578cf3 100644
+--- a/torch/_functorch/_aot_autograd/autograd_cache.py
++++ b/torch/_functorch/_aot_autograd/autograd_cache.py
+@@ -28,6 +28,8 @@
+     chromium_event_log_active,
+     CompileEventLogger,
+     counters,
++    is_safe_numpy_wrapper,
++    numpy_wrapper_cache_key,
+     warn_once,
+ )
+ from torch._functorch import config
+@@ -203,6 +205,8 @@ def is_safe_torch_function(target: Callable[..., Any]) -> bool:
+     def is_cacheable_function(target: Callable[..., Any]) -> bool:
+         if isinstance(target, (torch._ops.OpOverload, torch._ops.OpOverloadPacket)):
+             return True
++        if is_safe_numpy_wrapper(target):
++            return True
+         if is_public_torch_api(target):
+             return True
+         # Technically, FXGraphCache._check_for_hop already checks this,
+@@ -567,6 +571,10 @@ def reducer_override(self, obj: Any) -> Any:
+         fall through to the default __reduce_ex__ which includes non-deterministic
+         storage addresses. This method catches those cases using isinstance checks.
+         """
++        if isinstance(obj, torch.fx.GraphModule):
++            return self._reduce_graph_module_for_cache_key(obj)
++        if (numpy_key := numpy_wrapper_cache_key(obj)) is not None:
++            return (_ident, (numpy_key,))
+         # Handle tensor subclasses that aren't exactly torch.Tensor
+         # dispatch_table already handles torch.Tensor exactly
+         if isinstance(obj, torch.Tensor) and type(obj) is not torch.Tensor:
+@@ -574,6 +582,36 @@ def reducer_override(self, obj: Any) -> Any:
+         # Fall back to parent class reducer which handles unpicklable types
+         return super().reducer_override(obj)
+ 
++    @staticmethod
++    def _format_global_for_cache_key(name: str, obj: Any) -> str:
++        if (numpy_key := numpy_wrapper_cache_key(obj)) is not None:
++            return f"# cache_key_numpy_wrapper {name}: {numpy_key!r}"
++
++        from torch.fx.graph_module import _format_import_statement
++        from torch.package import sys_importer
++
++        return _format_import_statement(name, obj, sys_importer)
++
++    def _reduce_graph_module_for_cache_key(
++        self, gm: torch.fx.GraphModule
++    ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
++        recompile = getattr(gm, "_real_recompile", gm.recompile)
++        python_code = recompile()
++        # FxGraphCache strips user-defined Triton side-table indices from
++        # Inductor wrapper code. This reducer handles arbitrary AOT GraphModule
++        # code, so keep the generated code exact and let AOTAutogradCacheDetails
++        # carry Triton source/constant-arg metadata separately.
++        dict_without_graph = gm.__dict__.copy()
++        dict_without_graph.pop("_graph", None)
++
++        import_block = "\n".join(
++            sorted(
++                self._format_global_for_cache_key(name, obj)
++                for name, obj in python_code.globals.items()
++            )
++        )
++        return (_ident, ((dict_without_graph, import_block),))
++
+     # [NOTE] Tensor subclass stable hashing for AOT autograd cache
+     # Python's hash() varies with PYTHONHASHSEED, making cache keys unstable
+     # across processes. We use blake2b for cross-process determinism.

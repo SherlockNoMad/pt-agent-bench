@@ -1,0 +1,29 @@
+diff --git a/torch/_tensor.py b/torch/_tensor.py
+index ffd43a7873287..a29df464c0bc3 100644
+--- a/torch/_tensor.py
++++ b/torch/_tensor.py
+@@ -1253,7 +1253,10 @@ def __array__(self, dtype=None):
+ 
+     # Wrap Numpy array again in a suitable tensor when done, to support e.g.
+     # `numpy.sin(tensor) -> tensor` or `numpy.greater(tensor, 0) -> ByteTensor`
+-    def __array_wrap__(self, array):
++    # NumPy 2 passes `context` and `return_scalar`; torch has no scalars and
++    # does not need the context, so both are accepted and ignored. Declaring
++    # them avoids a NumPy 2 DeprecationWarning about the old call signature.
++    def __array_wrap__(self, array, context=None, return_scalar=False):
+         if has_torch_function_unary(self):
+             return handle_torch_function(
+                 Tensor.__array_wrap__, (self,), self, array=array
+diff --git a/torch/overrides.py b/torch/overrides.py
+index b6f0afa5b1b6c..ae648db5a67cc 100644
+--- a/torch/overrides.py
++++ b/torch/overrides.py
+@@ -1341,7 +1341,7 @@ def get_testing_overrides() -> dict[Callable, Callable]:
+         Tensor.__mod__: lambda self, other: -1,
+         Tensor.__rmod__: lambda self, other: -1,
+         Tensor.__imod__: lambda self, other: -1,
+-        Tensor.__array_wrap__: lambda self, array: -1,
++        Tensor.__array_wrap__: lambda self, array, context=None, return_scalar=False: -1,
+         Tensor.__getitem__: lambda self, idx: -1,
+         Tensor.__deepcopy__: lambda self, memo: -1,
+         Tensor.__int__: lambda self: -1,

@@ -1,0 +1,49 @@
+diff --git a/torch/_dynamo/backends/debugging.py b/torch/_dynamo/backends/debugging.py
+index fd9d20506dff6..7290408e5e767 100644
+--- a/torch/_dynamo/backends/debugging.py
++++ b/torch/_dynamo/backends/debugging.py
+@@ -152,7 +152,9 @@ def inner(*args: Any) -> Any:
+ def torchscript(
+     gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor]
+ ) -> torch.jit.ScriptModule:
+-    return torch.jit.script(gm)
++    from torch.fx._lazy_graph_module import _unwrap_lazy_graph_module
++
++    return torch.jit.script(_unwrap_lazy_graph_module(gm))
+ 
+ 
+ def invoke_subgraph_inner_compiler(
+diff --git a/torch/_functorch/compilers.py b/torch/_functorch/compilers.py
+index d7982deefadce..fc417f8140b8d 100644
+--- a/torch/_functorch/compilers.py
++++ b/torch/_functorch/compilers.py
+@@ -79,6 +79,10 @@ def ts_compile(fx_g: fx.GraphModule, inps: Sequence[Any]) -> torch.jit.ScriptMod
+         Torch scripted model.
+     """
+ 
++    from torch.fx._lazy_graph_module import _unwrap_lazy_graph_module
++
++    fx_g = _unwrap_lazy_graph_module(fx_g)
++
+     with _disable_jit_autocast():
+         strip_overloads(fx_g)
+ 
+diff --git a/torch/fx/_lazy_graph_module.py b/torch/fx/_lazy_graph_module.py
+index 20a7837a66618..ee08a1d4a353a 100644
+--- a/torch/fx/_lazy_graph_module.py
++++ b/torch/fx/_lazy_graph_module.py
+@@ -68,6 +68,14 @@ def _make_graph_module(
+     return graph_module_cls(*args, **kwargs)
+ 
+ 
++@compatibility(is_backward_compatible=False)
++def _unwrap_lazy_graph_module(gm: GraphModule) -> GraphModule:
++    # torch.jit.script cannot script _LazyGraphModule, so rebuild a plain one
++    if isinstance(gm, _LazyGraphModule):
++        return GraphModule(gm, gm.graph)
++    return gm
++
++
+ @compatibility(is_backward_compatible=False)
+ class _LazyGraphModule(GraphModule):
+     """

@@ -1,0 +1,47 @@
+{
+  "instance_id": "pytorch__pytorch-186070",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "141242"
+  ],
+  "pull_number": 186070,
+  "base_commit": "fee2a2becae373775d77824fa000ef215ba3281b",
+  "problem_statement": "Draft mode export coloring is unreadable on white terminal\n\n### \ud83d\udc1b Describe the bug\n\nSample:\r\n\r\n<img width=\"1420\" alt=\"image\" src=\"https://github.com/user-attachments/assets/1a1c0654-5b08-4298-a4c3-3d7b1af76f90\">\r\n\n\n### Versions\n\nmain\n\ncc @chauhang @penguinwu @avikchaudhuri @gmagogsfm @zhxchen17 @tugsbayasgalan @angelayi @suo @ydwu4",
+  "patch": "diff --git a/torch/export/_draft_export.py b/torch/export/_draft_export.py\nindex c3fb1cd6d1de3..6c2c9f59f70b0 100644\n--- a/torch/export/_draft_export.py\n+++ b/torch/export/_draft_export.py\n@@ -29,6 +29,15 @@\n log = logging.getLogger(__name__)\n \n \n+_DRAFT_EXPORT_WARNING_COLOR = \"\\033[31m\"\n+_DRAFT_EXPORT_SUCCESS_COLOR = \"\\033[32m\"\n+_DRAFT_EXPORT_END_COLOR = \"\\033[0m\"\n+\n+\n+def _format_colored(text: str, color: str) -> str:\n+    return f\"{color}{text}{_DRAFT_EXPORT_END_COLOR}\"\n+\n+\n class FailureType(IntEnum):\n     MISSING_FAKE_KERNEL = 1\n     DATA_DEPENDENT_ERROR = 2\n@@ -178,29 +187,31 @@ def __repr__(self) -> str:\n         return f\"DraftExportReport({self.failures})\"\n \n     def __str__(self) -> str:\n-        WARNING_COLOR = \"\\033[93m\"\n-        GREEN_COLOR = \"\\033[92m\"\n-        END_COLOR = \"\\033[0m\"\n-\n         if self.successful():\n-            return f\"\"\"{GREEN_COLOR}\n+            return _format_colored(\n+                \"\"\"\n ##############################################################################################\n Congratulations: No issues are found during export, and it was able to soundly produce a graph.\n You can now change back to torch.export.export()\n ##############################################################################################\n-{END_COLOR}\"\"\"\n+\"\"\",\n+                _DRAFT_EXPORT_SUCCESS_COLOR,\n+            )\n \n-        error = f\"\"\"{WARNING_COLOR}\n+        error = _format_colored(\n+            f\"\"\"\n ###################################################################################################\n WARNING: {len(self.failures)} issue(s) found during export, and it was not able to soundly produce a graph.\n Please follow the instructions to fix the errors.\n ###################################################################################################\n \n-\"\"\"\n+\"\"\",\n+            _DRAFT_EXPORT_WARNING_COLOR,\n+        )\n+        error += \"\\n\"\n \n         for i, failure in enumerate(self.failures):\n             error += f\"{i + 1}. {failure.print(self.str_to_filename)}\\n\"\n-        error += END_COLOR\n         return error\n \n     def apply_suggested_fixes(self) -> None:\n",
+  "test_patch": "diff --git a/test/export/test_draft_export.py b/test/export/test_draft_export.py\nindex fefd35ad99ead..bd2920566b63d 100644\n--- a/test/export/test_draft_export.py\n+++ b/test/export/test_draft_export.py\n@@ -9,7 +9,7 @@\n from torch._dynamo.exc import UserError, UserErrorType\n from torch._subclasses.fake_tensor import FakeTensorMode\n from torch.export import Dim, draft_export, export\n-from torch.export._draft_export import FailureType\n+from torch.export._draft_export import DraftExportReport, FailureReport, FailureType\n from torch.fx.experimental.symbolic_shapes import ShapeEnv\n from torch.testing import FileCheck\n from torch.testing._internal.common_utils import IS_WINDOWS, run_tests, TestCase\n@@ -34,6 +34,34 @@ def setUp(self):\n     def tearDown(self):\n         return\n \n+    def test_report_warning_color_is_readable_on_light_background(self):\n+        report = DraftExportReport(\n+            [\n+                FailureReport(\n+                    FailureType.MISSING_FAKE_KERNEL,\n+                    {\"op\": \"mylib.foo.default\"},\n+                )\n+            ],\n+            {},\n+            {},\n+            {},\n+        )\n+\n+        rendered = str(report)\n+        self.assertIn(\"\\033[31m\", rendered)\n+        self.assertNotIn(\"\\033[93m\", rendered)\n+        self.assertLess(\n+            rendered.index(\"\\033[0m\"),\n+            rendered.index(\"1. Missing fake kernel.\"),\n+        )\n+\n+    def test_report_success_color_is_readable_on_light_background(self):\n+        report = DraftExportReport([], {}, {}, {})\n+\n+        rendered = str(report)\n+        self.assertIn(\"\\033[32m\", rendered)\n+        self.assertNotIn(\"\\033[92m\", rendered)\n+\n     def test_retry_on_constraint_violation_uses_dim_auto(self):\n         class M(torch.nn.Module):\n             def forward(self, x):\n",
+  "FAIL_TO_PASS": [
+    "test/export/test_draft_export.py::TestDraftExport::test_report_success_color_is_readable_on_light_background",
+    "test/export/test_draft_export.py::TestDraftExport::test_report_warning_color_is_readable_on_light_background"
+  ],
+  "PASS_TO_PASS": [
+    "test/export/test_draft_export.py::TestDraftExport::test_complex_data_dependent_expr",
+    "test/export/test_draft_export.py::TestDraftExport::test_constantify_unbacked_symbol",
+    "test/export/test_draft_export.py::TestDraftExport::test_data_dependent_failure",
+    "test/export/test_draft_export.py::TestDraftExport::test_dedup_data_dependent_failure",
+    "test/export/test_draft_export.py::TestDraftExport::test_fake_infer_dense_in_memory_check",
+    "test/export/test_draft_export.py::TestDraftExport::test_masked_linear",
+    "test/export/test_draft_export.py::TestDraftExport::test_missing_meta_kernel_custom_op_basic",
+    "test/export/test_draft_export.py::TestDraftExport::test_missing_meta_kernel_custom_op_multiple_profiles",
+    "test/export/test_draft_export.py::TestDraftExport::test_missing_meta_kernel_custom_op_update_profile",
+    "test/export/test_draft_export.py::TestDraftExport::test_missing_meta_kernel_impl",
+    "test/export/test_draft_export.py::TestDraftExport::test_offsets",
+    "test/export/test_draft_export.py::TestDraftExport::test_override_incorrectly_aliasing_kernel",
+    "test/export/test_draft_export.py::TestDraftExport::test_override_mismatched_fake_kernel_with_unbacked_symbols",
+    "test/export/test_draft_export.py::TestDraftExport::test_override_size_and_dtype_mismatched_fake_kernels",
+    "test/export/test_draft_export.py::TestDraftExport::test_shape_failure",
+    "test/export/test_draft_export.py::TestDraftExport::test_side_effect1",
+    "test/export/test_draft_export.py::TestDraftExport::test_side_effect_inps",
+    "test/export/test_draft_export.py::TestDraftExport::test_torchbind"
+  ],
+  "test_files": [
+    "test/export/test_draft_export.py"
+  ],
+  "fix_files": [
+    "torch/export/_draft_export.py"
+  ],
+  "created_at": "2026-06-03T11:05:40Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

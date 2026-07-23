@@ -1,0 +1,67 @@
+diff --git a/test/dynamo/test_subclasses.py b/test/dynamo/test_subclasses.py
+index 75e335c795f22..1b8e4dabddc6a 100644
+--- a/test/dynamo/test_subclasses.py
++++ b/test/dynamo/test_subclasses.py
+@@ -3527,6 +3527,21 @@ def test_deferred_init_subclass_init_not_traced(self):
+         self.assertEqual(shell._data, data)
+         self.assertEqual(shell._scale, 2.0)
+ 
++    def test_tensor_subclass_super_new(self):
++        # super().__new__(cls, tensor) should be traceable in Tensor subclasses
++        class MyTensor(torch.Tensor):
++            def __new__(cls, x):
++                return super().__new__(cls, x)
++
++        @torch.compile(backend="eager", fullgraph=True)
++        def forward(x):
++            return MyTensor(x)
++
++        x = torch.randn(4, 10)
++        result = forward(x)
++        self.assertIsInstance(result, MyTensor)
++        self.assertEqual(result, x)
++
+ 
+ instantiate_parametrized_tests(SubclassTests)
+ 
+diff --git a/test/dynamo_expected_failures/CPython313-test_functools-TestPartialPy.test_nested_optimization_bug b/test/dynamo_expected_failures/CPython313-test_functools-TestPartialPy.test_nested_optimization_bug
+deleted file mode 100644
+index e69de29bb2d1d..0000000000000
+diff --git a/test/dynamo_expected_failures/CPython313-test_functools-TestPartialPySubclass.test_nested_optimization_bug b/test/dynamo_expected_failures/CPython313-test_functools-TestPartialPySubclass.test_nested_optimization_bug
+deleted file mode 100644
+index e69de29bb2d1d..0000000000000
+diff --git a/torch/_dynamo/polyfills/tensor.py b/torch/_dynamo/polyfills/tensor.py
+index 96a47843737fb..0fcad63620041 100644
+--- a/torch/_dynamo/polyfills/tensor.py
++++ b/torch/_dynamo/polyfills/tensor.py
+@@ -36,6 +36,16 @@ def make_subclass(
+         return data.as_subclass(cls)
+ 
+ 
++@substitute_in_graph(  # type: ignore[arg-type]
++    torch.Tensor.__new__
++)
++def tensor_pynew(
++    cls: type[Any], data: torch.Tensor, requires_grad: bool = False, **kwargs: Any
++) -> Any:
++    return make_subclass(cls, data, requires_grad, **kwargs)
++
++
+ __all__ = [
+     "make_subclass",
++    "tensor_pynew",
+ ]
+diff --git a/torch/_dynamo/variables/misc.py b/torch/_dynamo/variables/misc.py
+index d3ab60809a2e9..e4d3838b1b665 100644
+--- a/torch/_dynamo/variables/misc.py
++++ b/torch/_dynamo/variables/misc.py
+@@ -407,6 +407,9 @@ def call_method(
+             # e.g., tensor ops like `torch.Tensor.to`.
+             fn_var = VariableTracker.build(tx, inner_fn, source, realize=True)
+             return fn_var.call_function(tx, [self.objvar] + args, kwargs)
++        elif isinstance(inner_fn, types.BuiltinFunctionType):
++            fn_vt = VariableTracker.build(tx, inner_fn, source=source, realize=True)
++            return fn_vt.call_function(tx, args, kwargs)
+ 
+         unimplemented(
+             gb_type="Attempted to call a super() attribute that is "

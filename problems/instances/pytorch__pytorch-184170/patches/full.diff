@@ -1,0 +1,37 @@
+diff --git a/test/test_fake_tensor.py b/test/test_fake_tensor.py
+index 44c93a5f6d6a1..1335c767c51ba 100644
+--- a/test/test_fake_tensor.py
++++ b/test/test_fake_tensor.py
+@@ -1557,6 +1557,14 @@ def test_unique_output_dtype(self):
+             self.assertEqual(fake_inverse.dtype, real_inverse.dtype)
+             self.assertEqual(fake_counts.dtype, real_counts.dtype)
+ 
++    def test_select_out_of_bounds(self):
++        with FakeTensorMode():
++            x = torch.randn(3, 4)
++            with self.assertRaisesRegex(IndexError, "index .* out of range"):
++                torch.select(x, dim=1, index=10)
++            with self.assertRaisesRegex(IndexError, "index .* out of range"):
++                torch.select(x, dim=1, index=-10)
++
+ 
+ instantiate_parametrized_tests(FakeTensorTest)
+ 
+diff --git a/torch/_subclasses/fake_impls.py b/torch/_subclasses/fake_impls.py
+index 5e323ff2c7c35..e67b25a582374 100644
+--- a/torch/_subclasses/fake_impls.py
++++ b/torch/_subclasses/fake_impls.py
+@@ -491,6 +491,13 @@ def meta_select(
+     dim = dim if dim >= 0 else dim + ndim
+     size = self.size(dim)
+ 
++    if guard_or_false(index >= size) or guard_or_false(index < -size):
++        torch._check_index(
++            False,
++            lambda: f"select(): index {index} out of range for tensor of size "
++            f"{list(self.size())} at dimension {dim}",
++        )
++
+     new_size = list(self.size())
+     new_stride = list(self.stride())
+ 

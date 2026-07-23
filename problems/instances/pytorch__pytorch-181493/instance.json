@@ -1,0 +1,41 @@
+{
+  "instance_id": "pytorch__pytorch-181493",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "181462"
+  ],
+  "pull_number": 181493,
+  "base_commit": "2deace1f225e3ff25d776971def33ca59209c60a",
+  "problem_statement": "torch.split raises IndexError incorrectly when called in FakeTensorMode and dim_size == 0 but split_size > 0\n\n### \ud83d\udc1b Describe the bug\n\n```\nimport torch\nfrom torch._subclasses.fake_tensor import FakeTensorMode\n\n# Real tensor works\nx = torch.empty(0)\nprint(torch.split(x, 2))\n# Expected/actual: (tensor([]),)\n\n# FakeTensor crashes\nwith FakeTensorMode():\n  fx = torch.empty(0)\n  print(torch.split(fx, 2))\n# Raises IndexError\n```\n\n### Versions\n\nCollecting environment information...\n  PyTorch version: 2.6.0\n  Is debug build: False\n  CUDA used to build PyTorch: None\n  ROCM used to build PyTorch: N/A\n\n  OS: macOS 26.3.1 (arm64)\n  GCC version: Could not collect\n  Clang version: 17.0.0 (clang-1700.6.4.2)\n  CMake version: Could not collect\n  Libc version: N/A\n\n  Python version: 3.12.8 | packaged by Anaconda, Inc. | (main, Dec 11 2024, 10:37:40) [Clang 14.0.6 ]\n  (64-bit runtime)\n  Python platform: macOS-26.3.1-arm64-arm-64bit\n  Is CUDA available: False\n  CUDA runtime version: No CUDA\n  CUDA_MODULE_LOADING set to: N/A\n  GPU models and configuration: No CUDA\n  Nvidia driver version: No CUDA\n  cuDNN version: No CUDA\n  Is XPU available: False\n  HIP runtime version: N/A\n  MIOpen runtime version: N/A\n  Is XNNPACK available: True\n  Caching allocator config: N/A\n\n  CPU:\n  Apple M3 Pro\n\n  Versions of relevant libraries:\n  [pip3] mypy-extensions==1.0.0\n  [pip3] numpy==2.2.3\n  [pip3] optree==0.14.1\n  [pip3] torch==2.6.0\n  [conda] numpy                     2.2.3                    pypi_0    pypi\n  [conda] optree                    0.14.1                   pypi_0    pypi\n  [conda] torch                     2.6.0                    pypi_0    pypi\n\ncc @chauhang @penguinwu @eellison @aorenste @bdhirsh @bobrenjc93",
+  "patch": "diff --git a/torch/_decomp/decompositions.py b/torch/_decomp/decompositions.py\nindex 89d52c8a8332e..1356e555a2e22 100644\n--- a/torch/_decomp/decompositions.py\n+++ b/torch/_decomp/decompositions.py\n@@ -1446,12 +1446,10 @@ def unsafe_split_with_sizes(\n def split(self: Tensor, split_size: int, dim: int = 0) -> tuple[Tensor, ...]:\n     input_sizes = self.shape\n     dim_size = input_sizes[dim]\n-    if split_size == 0:\n-        if dim_size != 0:\n-            raise AssertionError(\n-                f\"split_size is 0 but dim_size is {dim_size}, expected 0\"\n-            )\n+    if dim_size == 0:\n         return (self.detach(),)\n+    if split_size == 0:\n+        raise AssertionError(f\"split_size is 0 but dim_size is {dim_size}, expected 0\")\n     chunks = (dim_size + split_size - 1) // split_size\n \n     # Avoid importing sympy at a module level\n",
+  "test_patch": "diff --git a/test/test_fake_tensor.py b/test/test_fake_tensor.py\nindex a543ea56258e7..069bc1ecc593c 100644\n--- a/test/test_fake_tensor.py\n+++ b/test/test_fake_tensor.py\n@@ -607,6 +607,16 @@ def fn(x):\n         out_eager = fn(torch.empty((0,)))\n         self.checkMetaProps(out_fake, out_eager)\n \n+    def test_split_empty_dim(self):\n+        def fn(x):\n+            return torch.split(x, 2)[0]\n+\n+        with FakeTensorMode(), enable_python_dispatcher():\n+            out_fake = fn(torch.empty((0,)))\n+\n+        out_eager = fn(torch.empty((0,)))\n+        self.checkMetaProps(out_fake, out_eager)\n+\n     def test_as_strided_negative_stride_error(self):\n         error = (\n             r\"as_strided: Negative strides are not supported at the \"\n",
+  "FAIL_TO_PASS": [
+    "test/test_fake_tensor.py::FakeTensorTest::test_split_empty_dim",
+    "test/test_fake_tensor.py::PropagateRealTensorsFakeTensorTest::test_split_empty_dim_propagate_real_tensors"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_fake_tensor.py::FakeTensorTest::test__adaptive_avg_pool2d_backward",
+    "test/test_fake_tensor.py::FakeTensorTest::test_alias_call",
+    "test/test_fake_tensor.py::FakeTensorTest::test_allow_meta",
+    "test/test_fake_tensor.py::FakeTensorTest::test_avoid_device_init_with_privateuse1_backend_is_available_False",
+    "test/test_fake_tensor.py::FakeTensorTest::test_avoid_device_init_with_privateuse1_backend_is_available_True",
+    "test/test_fake_tensor.py::FakeTensorTest::test_avoid_device_init_without_backends",
+    "test/test_fake_tensor.py::FakeTensorTest::test_basic",
+    "test/test_fake_tensor.py::FakeTensorTest::test_batch_tensor",
+    "test/test_fake_tensor.py::FakeTensorTest::test_binary_op_type_promotion",
+    "test/test_fake_tensor.py::FakeTensorTest::test_constructor",
+    "test/test_fake_tensor.py::FakeTensorTest::test_conv_nhwc",
+    "test/test_fake_tensor.py::FakeTensorTest::test_convert_fake_to_real"
+  ],
+  "test_files": [
+    "test/test_fake_tensor.py"
+  ],
+  "fix_files": [
+    "torch/_decomp/decompositions.py"
+  ],
+  "created_at": "2026-04-29T00:31:42Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

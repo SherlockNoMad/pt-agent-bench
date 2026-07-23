@@ -1,0 +1,96 @@
+diff --git a/torch/_meta_registrations.py b/torch/_meta_registrations.py
+index 4c0d6bdd9b44a..600ca23fab904 100644
+--- a/torch/_meta_registrations.py
++++ b/torch/_meta_registrations.py
+@@ -2763,7 +2763,7 @@ def meta_miopen_batch_norm(
+ def meta_conv(
+     input_tensor: torch.Tensor,
+     weight: torch.Tensor,
+-    bias: torch.Tensor,
++    bias: torch.Tensor | None,
+     stride: list[int],
+     padding: list[int],
+     dilation: list[int],
+@@ -2798,6 +2798,35 @@ def meta_conv(
+     return out
+ 
+ 
++@register_meta(aten._convolution.default)
++def meta__conv(
++    input_tensor: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None,
++    stride: list[int],
++    padding: list[int],
++    dilation: list[int],
++    transposed: bool,
++    output_padding: list[int],
++    groups: int,
++    benchmark: bool,
++    deterministic: bool,
++    cudnn_enabled: bool,
++    allow_tf32: bool = True,
++):
++    return meta_conv(
++        input_tensor,
++        weight,
++        bias,
++        stride,
++        padding,
++        dilation,
++        transposed,
++        output_padding,
++        groups,
++    )
++
++
+ if torch._C._has_mkldnn:
+     _meta_lib_dont_use_me_use_register_meta_for_mkldnn = torch.library.Library(
+         "mkldnn", "IMPL", "Meta"
+diff --git a/torch/_subclasses/fake_impls.py b/torch/_subclasses/fake_impls.py
+index 0e000929fdae7..9b12c387ae70e 100644
+--- a/torch/_subclasses/fake_impls.py
++++ b/torch/_subclasses/fake_impls.py
+@@ -1681,7 +1681,14 @@ def nyi(fake_mode: FakeTensorMode, func: OpOverload, *args: Any, **kwargs: Any)
+         raise AssertionError(f"NYI: {func}")
+ 
+ 
+-@register_op_impl([aten.convolution.default, aten.convolution_backward.default])
++@register_op_impl(
++    [
++        aten.convolution.default,
++        aten._convolution.default,
++        aten._convolution.deprecated,
++        aten.convolution_backward.default,
++    ]
++)
+ def conv(
+     fake_mode: FakeTensorMode, func: OpOverload, *args: Any, **kwargs: Any
+ ) -> FakeTensor | tuple[FakeTensor | None, FakeTensor | None, FakeTensor | None]:
+@@ -1693,7 +1700,12 @@ def conv(
+     # Internal passes such as Inductor freezing may run fake propagation over
+     # folded convs that do not need to match eager's public input checks.
+     if (
+-        func is aten.convolution.default
++        func
++        in (
++            aten.convolution.default,
++            aten._convolution.default,
++            aten._convolution.deprecated,
++        )
+         and input_.dtype != weight.dtype
+         and not input_.is_mkldnn
+         and not fake_mode.allow_non_fake_inputs
+@@ -1764,7 +1776,11 @@ def convert(
+     with in_kernel_invocation_manager(fake_mode):
+         out = func(**new_kwargs)
+ 
+-        if func is aten.convolution.default:
++        if func in (
++            aten.convolution.default,
++            aten._convolution.default,
++            aten._convolution.deprecated,
++        ):
+             return convert(out, mem_fmt)  # type: ignore[return]
+         else:
+             return (

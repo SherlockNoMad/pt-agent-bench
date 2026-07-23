@@ -1,0 +1,33 @@
+{
+  "instance_id": "pytorch__pytorch-185694",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "185659"
+  ],
+  "pull_number": 185694,
+  "base_commit": "9082cdc0be87044a0debd91ef1c67a340dace78f",
+  "problem_statement": "future annotations break torch.library.triton_op\n\nrepro:\n\n```py\nfrom __future__ import annotations\n\nfrom torch.library import triton_op\n\n\ndef register():\n    import torch\n\n    @triton_op(\"repro::bad\", mutates_args=())\n    def bad(x: torch.Tensor) -> torch.Tensor:\n        return x\n\nregister()\n```\nValueError: infer_schema(func): Unsupported type annotation torch.Tensor. It is not a type. Got func with signature (x: 'torch.Tensor') -> 'torch.Tensor')\n\nAlso, this error is difficult to diagnose, because there is a try-finally that just swallows the following:\n\"NameError: name 'torch' is not defined\". Would love it for this one to be fixed too.\n\n[meta-internal context](T273473179)\n\ncc @lolpack @maggiemoss @ndmitchell @kinto0 @samwgoldman @anjali411 @chauhang @penguinwu @bdhirsh @bobrenjc93 @aorenste",
+  "patch": "diff --git a/torch/_library/infer_schema.py b/torch/_library/infer_schema.py\nindex eb06088b951fa..2af9e781038fc 100644\n--- a/torch/_library/infer_schema.py\n+++ b/torch/_library/infer_schema.py\n@@ -92,9 +92,19 @@ def error_fn(what):\n     def convert_type_string(annotation_type: str):\n         try:\n             return eval(annotation_type, pf_globals, pf_locals)\n-        except Exception:\n+        except NameError as e:\n             error_fn(\n-                f\"Unsupported type annotation {annotation_type}. It is not a type.\"\n+                f\"Unsupported type annotation {annotation_type}. It is not a type. \"\n+                f\"({e}). \"\n+                f\"If you are using 'from __future__ import annotations', note that \"\n+                f\"annotations are evaluated lazily as strings; make sure all types \"\n+                f\"referenced in annotations are importable at module scope, not only \"\n+                f\"inside a local function.\"\n+            )\n+        except Exception as e:\n+            error_fn(\n+                f\"Unsupported type annotation {annotation_type}. It is not a type. \"\n+                f\"({type(e).__name__}: {e})\"\n             )\n \n     def unstringify_types(\n",
+  "test_patch": "diff --git a/test/custom_operator/test_infer_schema_annotation.py b/test/custom_operator/test_infer_schema_annotation.py\nindex f76d5192a070a..b5c076d1c700b 100644\n--- a/test/custom_operator/test_infer_schema_annotation.py\n+++ b/test/custom_operator/test_infer_schema_annotation.py\n@@ -207,6 +207,20 @@ def foo_op_2(x: Tensor) -> E:  # noqa: F821\n \n             torch.library.infer_schema(foo_op_2, mutates_args=mutates_args)\n \n+    def test_name_error_hint(self):\n+        # When from __future__ import annotations is active and a type name cannot\n+        # be resolved (e.g. because it was only imported inside a nested function),\n+        # the error should include the original NameError and a hint about module scope.\n+        with self.assertRaisesRegex(\n+            ValueError,\n+            r\"from __future__ import annotations\",\n+        ):\n+\n+            def foo_op(x: D) -> Tensor:  # noqa: F821\n+                return torch.Tensor(x)\n+\n+            torch.library.infer_schema(foo_op, mutates_args=mutates_args)\n+\n \n if __name__ == \"__main__\":\n     run_tests()\n",
+  "FAIL_TO_PASS": [
+    "test/custom_operator/test_infer_schema_annotation.py::TestInferSchemaWithAnnotation::test_name_error_hint"
+  ],
+  "PASS_TO_PASS": [
+    "test/custom_operator/test_infer_schema_annotation.py::TestInferSchemaWithAnnotation::test_native_types",
+    "test/custom_operator/test_infer_schema_annotation.py::TestInferSchemaWithAnnotation::test_tensor",
+    "test/custom_operator/test_infer_schema_annotation.py::TestInferSchemaWithAnnotation::test_torch_types",
+    "test/custom_operator/test_infer_schema_annotation.py::TestInferSchemaWithAnnotation::test_type_variants",
+    "test/custom_operator/test_infer_schema_annotation.py::TestInferSchemaWithAnnotation::test_unsupported_annotation"
+  ],
+  "test_files": [
+    "test/custom_operator/test_infer_schema_annotation.py"
+  ],
+  "fix_files": [
+    "torch/_library/infer_schema.py"
+  ],
+  "created_at": "2026-05-31T22:06:56Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": true
+  }
+}

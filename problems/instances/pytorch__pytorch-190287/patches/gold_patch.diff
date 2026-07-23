@@ -1,0 +1,27 @@
+diff --git a/torch/_dynamo/convert_frame.py b/torch/_dynamo/convert_frame.py
+index 444eb80fd120a..14e6026eba0a8 100644
+--- a/torch/_dynamo/convert_frame.py
++++ b/torch/_dynamo/convert_frame.py
+@@ -2570,6 +2570,7 @@ def __call__(
+                 and not getattr(self._torchdynamo_orig_backend, "_export", False)
+             )
+         ):
++            apply_to_code = True
+             if has_started_execution:
+                 skip_reason = "frame has already started executing"
+             elif is_skipfile:
+@@ -2581,7 +2582,13 @@ def __call__(
+                     "non-infra torch dispatch mode present, this is not"
+                     " supported today in torch.compile"
+                 )
+-            return self._handle_skip(ConvertFrameReturn(skip_reason=skip_reason), frame)
++                apply_to_code = False
++            return self._handle_skip(
++                ConvertFrameReturn(
++                    apply_to_code=apply_to_code, skip_reason=skip_reason
++                ),
++                frame,
++            )
+ 
+         if (
+             frame.f_code.co_filename == "<string>" and frame.f_code.co_name == "__new__"

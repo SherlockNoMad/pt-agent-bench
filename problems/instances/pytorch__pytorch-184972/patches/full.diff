@@ -1,0 +1,68 @@
+diff --git a/test/dynamo/test_misc.py b/test/dynamo/test_misc.py
+index 1166215d267b1..8f76dacae9504 100644
+--- a/test/dynamo/test_misc.py
++++ b/test/dynamo/test_misc.py
+@@ -6182,6 +6182,47 @@ def fn(a, b):
+         self.assertEqual(cnts.frame_count, 1)
+         self.assertEqual(cnts.op_count, 3)
+ 
++    @torch._dynamo.config.patch(graph_break_on_nn_param_ctor=False)
++    def test_param_grad_in_forward(self):
++        cnts = torch._dynamo.testing.CompileCounter()
++
++        def fn(x):
++            w = torch.nn.Parameter(torch.ones(4, 4))
++            saw_none = w.grad is None
++            if saw_none:
++                w.grad = torch.zeros_like(w)
++            return saw_none, w.grad + x
++
++        x = torch.randn(4, 4)
++        ref = fn(x)
++
++        opt_fn = torch.compile(fn, backend=cnts, fullgraph=True)
++        res = opt_fn(x)
++
++        self.assertTrue(res[0])
++        self.assertEqual(ref[1], res[1])
++        self.assertEqual(cnts.frame_count, 1)
++
++    @torch._dynamo.config.patch(
++        graph_break_on_nn_param_ctor=False, trace_autograd_ops=True
++    )
++    def test_param_autograd_grad_in_forward(self):
++        def fn(x):
++            w = torch.nn.Parameter(torch.ones(4, 4))
++            y = (x @ w).sum()
++            (grad,) = torch.autograd.grad(y, w)
++            return grad is not None, w.grad is None, grad
++
++        x = torch.randn(4, 4)
++        ref = fn(x)
++
++        opt_fn = torch.compile(fn, backend="eager", fullgraph=False)
++        res = opt_fn(x)
++
++        self.assertTrue(res[0])
++        self.assertTrue(res[1])
++        self.assertEqual(ref[2], res[2])
++
+     def test_intermediary_tensor_grad_access(self):
+         # This test creates a model, and accesses the grads
+         # from its parameters and an entirely intermediary tensor.
+diff --git a/torch/_dynamo/variables/tensor.py b/torch/_dynamo/variables/tensor.py
+index 80234a56f8fba..90d7ea5313341 100644
+--- a/torch/_dynamo/variables/tensor.py
++++ b/torch/_dynamo/variables/tensor.py
+@@ -577,6 +577,11 @@ def method_attr_grad(
+     ) -> VariableTracker | None:
+         if tx.output.side_effects.has_pending_mutation_of_attr(self, "grad"):
+             return tx.output.side_effects.load_attr(self, "grad")
++        if (
++            isinstance(self.mutation_type, AttributeMutationNew)
++            and not self.has_grad_fn
++        ):
++            return ConstantVariable.create(None)
+         # None tells var_getattr to use default .grad handling
+         return None
+ 

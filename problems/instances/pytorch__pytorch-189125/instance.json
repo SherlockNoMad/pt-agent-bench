@@ -1,0 +1,46 @@
+{
+  "instance_id": "pytorch__pytorch-189125",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "169111"
+  ],
+  "pull_number": 189125,
+  "base_commit": "e482ddc6b537bd860127da6ff8eadc1562affcd7",
+  "problem_statement": "`torch.compile(backend=\"tvm\", fullgraph=True, dynamic=True)` fails on PyTorch 2.9.0 with `RuntimeError: Tracer cannot infer type ... Only tensors ... supported, but got SymInt`\n\n### \ud83d\udc1b Describe the bug\n\n### Summary\nWhen compiling a simple CNN+FC model with `torch.compile(fullgraph=True, dynamic=True, backend=\"tvm\")`, the TVM backend inside PyTorch calls `torch.jit.trace(gm, example_inputs)` and fails with `Tracer cannot infer type ... Only tensors ... supported, but instead got value of type SymInt`. This happens before TVM codegen is invoked, so the failure appears to be in PyTorch\u2019s `torch._dynamo.backends.tvm` path (JIT trace step) not handling SymInt correctly.\n\n### Minimal Repro (self-contained)\n```python\n# -*- coding: utf-8 -*-\nimport torch\nimport torch.nn as nn\n\nclass MyModel(nn.Module):\n    def __init__(self):\n        super(MyModel, self).__init__()\n        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)\n        self.relu = nn.ReLU()\n        # very large FC just to make the shape realistic\n        self.fc = nn.Linear(16 * 224 * 224, 10)\n\n    def forward(self, x):\n        x = self.conv1(x)\n        x = self.relu(x)\n        x = x.view(x.size(0), -1)   # introduces symbolic dim from batch\n        x = self.fc(x)\n        return x\n\ndef my_model_function(): return MyModel()\ndef GetInput(): return torch.rand(1, 3, 224, 224, dtype=torch.float32)\n\ndef main():\n    # 1) Eager (CPU) \u2014 OK\n    model_eager = my_model_function().to(\"cpu\").eval()\n    with torch.no_grad():\n        out_eager = model_eager(GetInput().to(\"cpu\"))\n    print(\"Eager:\", out_eager.shape, out_eager.dtype, out_eager.device)\n\n    # 2) compile with backend='tvm'\n    model_cpu = my_model_function().to(\"cpu\").eval()\n    compiled = torch.compile(model_cpu, fullgraph=True, dynamic=True, backend=\"tvm\")\n    with torch.no_grad():\n        out_compiled = compiled(GetInput().to(\"cpu\"))  # <-- fails\n    print(\"Compiled:\", out_compiled.shape)\n\nif __name__ == \"__main__\":\n    main()\n```\n\n### Actual Traceback (abridged):\n```\nbackend='tvm' raised:\nRuntimeError: Tracer cannot infer type of (Parameter containing: ... , s53, tensor(...), Parameter containing: ...)\n:Only tensors and (possibly nested) tuples of tensors, lists, or dicts are supported\nas inputs or outputs of traced functions, but instead got value of type SymInt.\n\n  File \".../torch/_dynamo/backends/tvm.py\", line 57, in tvm\n    jit_mod = torch.jit.trace(gm, example_inputs)\n  File \".../torch/jit/_trace.py\", line 1181, in trace_module\n    module._c._create_method_from_trace(...)\n```\n\n\n\n### Versions\n\n```\nPyTorch: 2.9.0 (pip wheels)\n\nTVM: 0.18.0 (built from source)\n\nPython: 3.10.x\n\nCUDA / cuDNN: 12.x / 9xx (not directly used in failing path; repro uses CPU)\n\nOS: Ubuntu 22.04\n\nHardware: x86_64, NVIDIA GPU available but not required to reproduce\n```\n\ncc @bdhirsh @chauhang @penguinwu",
+  "patch": "diff --git a/torch/_dynamo/backends/tvm.py b/torch/_dynamo/backends/tvm.py\nindex 7f5a408c2e12e..43e952c16e48a 100644\n--- a/torch/_dynamo/backends/tvm.py\n+++ b/torch/_dynamo/backends/tvm.py\n@@ -110,6 +110,16 @@ def _tvm_relay_compile(\n     from tvm import relay  # type: ignore[import]\n     from tvm.contrib import graph_executor  # type: ignore[import]\n \n+    if any(\n+        isinstance(x, (torch.SymInt, torch.SymFloat, torch.SymBool))\n+        for x in example_inputs\n+    ):\n+        raise RuntimeError(\n+            \"The TVM (relay) backend does not support dynamic shapes: got symbolic \"\n+            \"scalar graph inputs. Either compile with dynamic=False or use TVM's \"\n+            \"relax frontend instead: from tvm.relax.frontend.torch import relax_dynamo; \"\n+            \"torch.compile(model, backend=relax_dynamo()).\"\n+        )\n     jit_mod = torch.jit.trace(gm, example_inputs)\n     device = device_from_inputs(example_inputs)\n     shape_list = [(f\"inp_{idx}\", i.shape) for idx, i in enumerate(example_inputs)]\n",
+  "test_patch": "diff --git a/test/dynamo/test_backends.py b/test/dynamo/test_backends.py\nindex ec38178424528..c3f6501ca738e 100644\n--- a/test/dynamo/test_backends.py\n+++ b/test/dynamo/test_backends.py\n@@ -1,4 +1,5 @@\n # Owner(s): [\"module: dynamo\"]\n+import importlib.machinery\n import importlib.util\n import sys\n import unittest\n@@ -256,6 +257,30 @@ def find_spec(present):\n             relax.assert_called_once()\n             relay.assert_called_once()\n \n+    def test_tvm_dynamic_shapes_error(self, device):\n+        def fn(x):\n+            return x.view(x.size(0), -1) + 1\n+\n+        x = torch.randn(2, 3, device=device)\n+        compiled = torch.compile(fn, backend=\"tvm\", dynamic=True)\n+        # stub tvm imports; the error fires before any tvm API is used.\n+        # find_spec() reads __spec__ off modules already in sys.modules, so\n+        # the relay stub needs a real ModuleSpec to route to the relay path.\n+        relay_stub = MagicMock()\n+        relay_stub.__spec__ = importlib.machinery.ModuleSpec(\"tvm.relay\", None)\n+        stubs = {\n+            \"tvm\": MagicMock(),\n+            \"tvm.contrib\": MagicMock(),\n+            \"tvm.relay\": relay_stub,\n+        }\n+        with patch.dict(sys.modules, stubs):\n+            with self.assertRaisesRegex(\n+                torch._dynamo.exc.BackendCompilerFailed,\n+                \"does not support dynamic shapes\",\n+            ):\n+                compiled(x)\n+        torch._dynamo.reset()\n+\n     @onlyHPU\n     def test_intel_gaudi_backend(self, device):\n         self._check_backend_works(\"hpu_backend\", device)\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_tvm_dynamic_shapes_error_cpu"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_backends.py::NormalizeIRTests::test_inplace_normalize",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_aot_autograd_api",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_graph_freeze",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_recompilation",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_cudagraphs_backend_accepts_extra_kwargs",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_backend_suggestion",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_custom_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_register_backend_api",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend_explicit_override",
+    "test/dynamo/test_backends.py::TestExplainWithBackend::test_explain_with_backend",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_decomp_partition_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_ts_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_noexcept_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_cpu"
+  ],
+  "test_files": [
+    "test/dynamo/test_backends.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/backends/tvm.py"
+  ],
+  "created_at": "2026-07-17T00:47:47Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": true
+  }
+}

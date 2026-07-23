@@ -1,0 +1,102 @@
+diff --git a/test/dynamo/test_decorators.py b/test/dynamo/test_decorators.py
+index 0a91ff01078bf..26179ba72dc09 100644
+--- a/test/dynamo/test_decorators.py
++++ b/test/dynamo/test_decorators.py
+@@ -1982,6 +1982,45 @@ def f4(x):
+         self.assertEqual(f4(inp), inp + 7)
+         self.assertEqual(cnts.frame_count, 2)
+ 
++    def test_error_on_graph_break_skips_redundant_set(self):
++        torch._dynamo.utils._set_error_on_graph_break(False)
++
++        with mock.patch(
++            "torch._dynamo.decorators._set_error_on_graph_break",
++            side_effect=AssertionError("redundant error_on_graph_break set"),
++        ):
++            with torch._dynamo.error_on_graph_break(False):
++                pass
++
++    def test_error_on_graph_break_reentrant_context_restores_outer_state(self):
++        torch._dynamo.utils._set_error_on_graph_break(True)
++        cm = torch._dynamo.error_on_graph_break(False)
++
++        try:
++            with cm:
++                self.assertFalse(torch._dynamo.utils._get_error_on_graph_break())
++                with cm:
++                    self.assertFalse(torch._dynamo.utils._get_error_on_graph_break())
++
++            self.assertTrue(torch._dynamo.utils._get_error_on_graph_break())
++        finally:
++            torch._dynamo.utils._set_error_on_graph_break(False)
++
++    def test_error_on_graph_break_compile_wrapper_skips_redundant_set(self):
++        torch._dynamo.utils._set_error_on_graph_break(False)
++
++        def fn(x):
++            return x + 1
++
++        opt_fn = torch._dynamo.optimize("eager", error_on_graph_break=False)(fn)
++        x = torch.ones(3)
++
++        with mock.patch(
++            "torch._dynamo.eval_frame._set_error_on_graph_break",
++            side_effect=AssertionError("redundant error_on_graph_break set"),
++        ):
++            self.assertEqual(opt_fn(x), fn(x))
++
+     def test_error_on_graph_break_nested(self):
+         # error_on_graph_break in a nested frame
+         cnts = torch._dynamo.testing.CompileCounter()
+diff --git a/torch/_dynamo/decorators.py b/torch/_dynamo/decorators.py
+index 822501605aa24..a79a2f21fc162 100644
+--- a/torch/_dynamo/decorators.py
++++ b/torch/_dynamo/decorators.py
+@@ -1639,12 +1639,17 @@ def disable_nested_graph_breaks(fn: Any | None = None) -> Any:
+ class ErrorOnGraphBreakDecoratorContextManager:
+     def __init__(self, error_on_graph_break: bool) -> None:
+         self.error_on_graph_break = error_on_graph_break
++        self.prev_error_on_graph_break: list[bool | None] = []
+ 
+     __call__ = wrap_dunder_call_ctx_manager
+ 
+     def __enter__(self) -> None:
+-        self.prev_error_on_graph_break = _get_error_on_graph_break()
+-        _set_error_on_graph_break(self.error_on_graph_break)
++        current_error_on_graph_break = _get_error_on_graph_break()
++        if current_error_on_graph_break != self.error_on_graph_break:
++            self.prev_error_on_graph_break.append(current_error_on_graph_break)
++            _set_error_on_graph_break(self.error_on_graph_break)
++        else:
++            self.prev_error_on_graph_break.append(None)
+ 
+     def __exit__(
+         self,
+@@ -1652,7 +1657,9 @@ def __exit__(
+         exc_val: BaseException | None,
+         exc_tb: TracebackType | None,
+     ) -> None:
+-        _set_error_on_graph_break(self.prev_error_on_graph_break)
++        prev_error_on_graph_break = self.prev_error_on_graph_break.pop()
++        if prev_error_on_graph_break is not None:
++            _set_error_on_graph_break(prev_error_on_graph_break)
+ 
+ 
+ def error_on_graph_break(
+diff --git a/torch/_dynamo/eval_frame.py b/torch/_dynamo/eval_frame.py
+index 8c0b2c7caec7e..ae923621643aa 100644
+--- a/torch/_dynamo/eval_frame.py
++++ b/torch/_dynamo/eval_frame.py
+@@ -1116,8 +1116,10 @@ def compile_wrapper(*args: Any, **kwargs: Any) -> Any:
+                 )
+                 prior_error_on_graph_break = None
+                 if not self.fullgraph and self.error_on_graph_break is not None:
+-                    prior_error_on_graph_break = _get_error_on_graph_break()
+-                    _set_error_on_graph_break(self.error_on_graph_break)
++                    current_error_on_graph_break = _get_error_on_graph_break()
++                    if current_error_on_graph_break != self.error_on_graph_break:
++                        prior_error_on_graph_break = current_error_on_graph_break
++                        _set_error_on_graph_break(self.error_on_graph_break)
+ 
+                 # Ensure that if an assertion occurs after graph pushes
+                 # something onto the DynamicLayerStack then we pop it off (the

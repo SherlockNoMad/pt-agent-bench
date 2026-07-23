@@ -1,0 +1,156 @@
+diff --git a/test/dynamo/test_recompiles.py b/test/dynamo/test_recompiles.py
+index 827062f17985e..2f978a44369da 100644
+--- a/test/dynamo/test_recompiles.py
++++ b/test/dynamo/test_recompiles.py
+@@ -420,6 +420,52 @@ def f(x):
+ 
+         self.assertEqual(counter.frame_count, 2)  # not three or four!
+ 
++    @torch._dynamo.config.patch(recompile_limit=2, fail_on_recompile_limit_hit=True)
++    def test_tensorify_python_builtin_mul_does_not_recompile(self):
++        counter = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
++
++        def scaling_step(update, dummy_tensor, lr):
++            dummy_tensor.mul_(0.5 * lr)
++
++            r, c = update.size(-2), update.size(-1)
++            scaling_factor = max(1, r / c) ** 0.5
++            update.mul_(scaling_factor * lr)
++
++            return update
++
++        compiled = torch.compile(scaling_step, backend=counter, fullgraph=True)
++        base_update = torch.randn(128, 128)
++        base_dummy = torch.randn(324, 64)
++
++        for i in range(8):
++            lr = 1e-4 * (i + 1)
++            self.assertEqual(
++                compiled(base_update.clone(), base_dummy.clone(), lr),
++                scaling_step(base_update.clone(), base_dummy.clone(), lr),
++            )
++
++        self.assertLessEqual(counter.frame_count, 2)
++
++    @torch._dynamo.config.patch(recompile_limit=2, fail_on_recompile_limit_hit=True)
++    def test_tensorify_python_builtin_pow_does_not_recompile(self):
++        counter = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
++
++        def step_param(v_t, bc2):
++            eps = 1e-8
++            return v_t.sqrt().div_(bc2**0.5).add_(eps)
++
++        compiled = torch.compile(step_param, backend=counter, fullgraph=True)
++        base_v_t = torch.randn(64, 1280)
++
++        for step in range(1, 9):
++            bc2 = 1.0 - 0.999**step
++            self.assertEqual(
++                compiled(base_v_t.clone(), bc2),
++                step_param(base_v_t.clone(), bc2),
++            )
++
++        self.assertLessEqual(counter.frame_count, 2)
++
+     def test_ambient_autocast_recompile(self):
+         weights = torch.randn(10, 10)
+         counter = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
+diff --git a/torch/fx/passes/_tensorify_python_scalars.py b/torch/fx/passes/_tensorify_python_scalars.py
+index f6f610ec53893..e5f20ca63fd71 100644
+--- a/torch/fx/passes/_tensorify_python_scalars.py
++++ b/torch/fx/passes/_tensorify_python_scalars.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import operator
+ import os
+ from typing import Any, TYPE_CHECKING
+ 
+@@ -85,12 +86,31 @@
+     torch.ops.aten.add.Tensor: torch.ops.aten.add.Tensor,
+     torch.ops.aten.sub.Tensor: torch.ops.aten.sub.Tensor,
+     torch.ops.aten.div.Tensor: torch.ops.aten.div.Tensor,
++    torch.ops.aten.pow.Tensor_Tensor: torch.ops.aten.pow.Tensor_Tensor,
++    operator.mul: torch.ops.aten.mul.Tensor,
++    operator.add: torch.ops.aten.add.Tensor,
++    operator.sub: torch.ops.aten.sub.Tensor,
++    operator.truediv: torch.ops.aten.div.Tensor,
++    operator.pow: torch.ops.aten.pow.Tensor_Tensor,
+     torch.ops.aten.gt.Scalar: torch.ops.aten.gt.Tensor,
+     torch.ops.aten.lt.Scalar: torch.ops.aten.lt.Tensor,
+     torch.ops.aten.ge.Scalar: torch.ops.aten.ge.Tensor,
+     torch.ops.aten.le.Scalar: torch.ops.aten.le.Tensor,
+     torch.ops.aten.eq.Scalar: torch.ops.aten.eq.Tensor,
+     torch.ops.aten.ne.Scalar: torch.ops.aten.ne.Tensor,
++    operator.gt: torch.ops.aten.gt.Tensor,
++    operator.lt: torch.ops.aten.lt.Tensor,
++    operator.ge: torch.ops.aten.ge.Tensor,
++    operator.le: torch.ops.aten.le.Tensor,
++    operator.eq: torch.ops.aten.eq.Tensor,
++    operator.ne: torch.ops.aten.ne.Tensor,
++}
++
++SUPPORTED_METHOD_OPS = {
++    "mul_": torch.ops.aten.mul.Tensor,
++    "add_": torch.ops.aten.add.Tensor,
++    "sub_": torch.ops.aten.sub.Tensor,
++    "div_": torch.ops.aten.div.Tensor,
+ }
+ 
+ 
+@@ -293,9 +313,22 @@ def _sympy_interp(expr: sympy.Expr) -> MetaProxy:
+ 
+             # Look for functions to convert
+ 
+-            if node.op == "call_function" and (
+-                replacement_op := SUPPORTED_OPS.get(node.target)
+-            ):
++            replacement_op = None
++            reinplace = False
++            if node.op == "call_function":
++                replacement_op = SUPPORTED_OPS.get(node.target)
++            elif node.op == "call_method":
++                replacement_op = SUPPORTED_METHOD_OPS.get(node.target)
++                reinplace = replacement_op is not None
++
++            if replacement_op is not None:
++                # Pure SymFloat/SymBool expression nodes are scalar intermediates,
++                # not tensor-valued ops. Let later tensor uses consume their
++                # symbolic expression instead of treating them as a tensorify
++                # failure here.
++                if not hasattr(node.meta.get("val"), "dtype"):
++                    continue
++
+                 args: list[Any] = []
+                 transform = False
+ 
+@@ -314,8 +347,14 @@ def _sympy_interp(expr: sympy.Expr) -> MetaProxy:
+                             transform = False
+                             break
+ 
+-                        # We use _expr instead of expr b/c we want the symbol not the replacement
+-                        tensorified_symbols.add(a.meta["val"].node._expr)
++                        # Track the original backed float symbols that flowed into
++                        # this tensorified expression so the later specialization
++                        # sweep does not incorrectly restart analysis for them.
++                        tensorified_symbols.update(
++                            s
++                            for s in a.meta["val"].node._expr.free_symbols
++                            if symbol_is_type(s, SymT.FLOAT)
++                        )
+ 
+                         # The upcasting is irrelevant when the compute dtype is bool. This happens
+                         # in cases where we are tensorifying a comparison operator such as
+@@ -345,6 +384,11 @@ def _sympy_interp(expr: sympy.Expr) -> MetaProxy:
+                             )
+                         )
+ 
++                    if reinplace:
++                        replacement_proxy = torch.ops.aten.copy_.default(
++                            args[0], replacement_proxy
++                        )
++
+                     node.replace_all_uses_with(replacement_proxy.node)
+ 
+                     graph.erase_node(node)

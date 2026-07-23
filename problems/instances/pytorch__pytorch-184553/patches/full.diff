@@ -1,0 +1,67 @@
+diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py
+index 29e942940b85c..934f884538e1c 100644
+--- a/test/dynamo/test_repros.py
++++ b/test/dynamo/test_repros.py
+@@ -1243,6 +1243,20 @@ def fn(x):
+         self.assertEqual(eager_out, compiled_out)
+         self.assertEqual(eager_out.stride(), compiled_out.stride())
+ 
++    # https://github.com/pytorch/pytorch/issues/183771
++    @parametrize("backend", ["aot_eager", "inductor"])
++    def test_interpolate_nearest_5d_channels_last_stride(self, backend):
++        def fn(x):
++            return F.interpolate(x, size=(5, 6, 7), mode="nearest")
++
++        x = torch.arange(2 * 5 * 2 * 3 * 2, dtype=torch.float32).reshape(2, 5, 2, 3, 2)
++        x = x.permute(0, 4, 1, 2, 3)
++        eager_out = fn(x)
++        compiled_out = torch.compile(fn, backend=backend, fullgraph=True)(x)
++
++        self.assertEqual(eager_out, compiled_out)
++        self.assertEqual(eager_out.stride(), compiled_out.stride())
++
+     # https://github.com/pytorch/pytorch/issues/174963
+     def test_roll_as_strided_channels_last(self):
+         def fn(x):
+diff --git a/torch/_decomp/decompositions.py b/torch/_decomp/decompositions.py
+index 1a2d143dc0856..28713897d0a28 100644
+--- a/torch/_decomp/decompositions.py
++++ b/torch/_decomp/decompositions.py
+@@ -3574,13 +3574,13 @@ def _upsample_nearest(
+     indices = [None, None] + spatial_indices
+     result = aten._unsafe_index(input, indices)
+ 
+-    if result.ndim == 4:
++    if result.ndim in (4, 5):
+         # convert output to correct memory format, if necessary
+         memory_format = utils.suggest_memory_format(input)
+ 
+         # following "heuristic: only use channels_last path when it's faster than the contiguous path"
+         n_channels = input.shape[1]
+-        if input.device.type == "cuda" and n_channels < 4:
++        if result.ndim == 4 and input.device.type == "cuda" and n_channels < 4:
+             memory_format = torch.contiguous_format
+ 
+         result = result.contiguous(memory_format=memory_format)
+diff --git a/torch/testing/_internal/common_methods_invocations.py b/torch/testing/_internal/common_methods_invocations.py
+index ad3ff0ac0fb86..17cf691af09a5 100644
+--- a/torch/testing/_internal/common_methods_invocations.py
++++ b/torch/testing/_internal/common_methods_invocations.py
+@@ -4937,6 +4937,17 @@ def uneven_shape(size, rank, with_batch_channel=True):
+                 mode=mode,
+                 align_corners=align_corners,
+             )
++            if mode in ("nearest", "nearest-exact") and rank == 3:
++                # https://github.com/pytorch/pytorch/issues/183771
++                yield SampleInput(
++                    make_arg(
++                        (2, 2, 5, 2, 3), memory_format=torch.channels_last_3d
++                    ),
++                    (5, 6, 7),
++                    scale_factor=None,
++                    mode=mode,
++                    align_corners=align_corners,
++                )
+             if rank > 1 and dtype.is_floating_point:
+                 yield SampleInput(
+                     make_arg(uneven_shape(D, rank)),

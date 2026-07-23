@@ -1,0 +1,177 @@
+diff --git a/test/dynamo/test_exc.py b/test/dynamo/test_exc.py
+index a57a50402ab5f..ea4ed16311cf4 100644
+--- a/test/dynamo/test_exc.py
++++ b/test/dynamo/test_exc.py
+@@ -2,6 +2,7 @@
+ 
+ import linecache
+ import os
++import pickle
+ import re
+ import sys
+ import tempfile
+@@ -14,6 +15,10 @@
+ import torch._dynamo.test_case
+ from torch._dynamo.comptime import comptime
+ from torch._dynamo.exc import (
++    BackendCompilerFailed,
++    InvalidBackend,
++    ResetRequired,
++    ShortenTraceback,
+     TorchDynamoException,
+     Unsupported,
+     UserError,
+@@ -85,6 +90,57 @@ def test_user_error_separated_from_unsupported(self):
+         self.assertEqual(err.message, "bad input")
+         self.assertEqual(str(err), "bad input")
+ 
++    @torch._dynamo.config.patch(suppress_errors=False)
++    def test_backend_compiler_failed_pickles_without_frame(self):
++        def backend_fn(gm, example_inputs):
++            exc = RuntimeError("backend exploded")
++            exc.frame = sys._getframe()
++            raise exc
++
++        def fn(x):
++            return x + 1
++
++        with self.assertRaises(BackendCompilerFailed) as cm:
++            torch.compile(fn, backend=backend_fn)(torch.ones(1))
++
++        err = cm.exception
++
++        restored = pickle.loads(pickle.dumps(err))
++
++        self.assertIsInstance(restored, BackendCompilerFailed)
++        self.assertEqual(restored.args, err.args)
++        self.assertEqual(str(restored), str(err))
++        self.assertEqual(restored.backend_name, "backend_fn")
++        self.assertIsInstance(restored.inner_exception, RuntimeError)
++        self.assertEqual(str(restored.inner_exception), "backend exploded")
++        self.assertEqual(
++            restored.inner_exception._dynamo_original_exception_type,
++            "builtins.RuntimeError",
++        )
++        self.assertIsNone(restored.first_useful_frame)
++
++    def test_dynamo_exceptions_pickle_without_rerunning_init(self):
++        cases = [
++            InvalidBackend("bad_backend"),
++            ResetRequired(),
++            ShortenTraceback("shortened", first_useful_frame=sys._getframe()),
++            UserError(UserErrorType.INVALID_INPUT, "bad input"),
++        ]
++
++        for err in cases:
++            with self.subTest(exc_type=type(err).__name__):
++                restored = pickle.loads(pickle.dumps(err))
++
++                self.assertIsInstance(restored, type(err))
++                self.assertEqual(restored.args, err.args)
++                self.assertEqual(str(restored), str(err))
++
++        self.assertIsNone(pickle.loads(pickle.dumps(cases[2])).first_useful_frame)
++        self.assertEqual(
++            pickle.loads(pickle.dumps(cases[3])).error_type,
++            UserErrorType.INVALID_INPUT,
++        )
++
+     def test_unsupported_real_stack(self):
+         # exercise Unsupported constructor and augment_exc_message
+         def fn002(x):
+diff --git a/torch/_dynamo/exc.py b/torch/_dynamo/exc.py
+index 24030fb151088..3a17dae7dc37a 100644
+--- a/torch/_dynamo/exc.py
++++ b/torch/_dynamo/exc.py
+@@ -31,6 +31,7 @@
+ import re
+ import sys
+ import textwrap
++import types
+ import typing
+ from enum import auto, Enum
+ from functools import lru_cache
+@@ -46,8 +47,6 @@
+ 
+ 
+ if TYPE_CHECKING:
+-    import types
+-
+     from torch._dynamo.variables import VariableTracker
+     from torch._guards import CompileId
+ 
+@@ -68,6 +67,53 @@ def exportdb_error_message(case_name: str) -> str:
+ graph_breaks_log = torch._logging.getArtifactLogger(__name__, "graph_breaks")
+ 
+ 
++_EXCEPTION_STATE_ATTRS_TO_DROP = frozenset(
++    (
++        "_torch_dynamo_tracer_output",
++        "first_useful_frame",
++        "frame_exec_strategy",
++    )
++)
++
++
++def _safe_exception_args(args: tuple[Any, ...]) -> tuple[Any, ...]:
++    return args
++
++
++class _SerializedException(RuntimeError):
++    _dynamo_original_exception_type: str
++
++    def __init__(self, exc: BaseException) -> None:
++        super().__init__(str(exc))
++        self._dynamo_original_exception_type = (
++            f"{type(exc).__module__}.{type(exc).__qualname__}"
++        )
++
++
++def _safe_inner_exception(exc: BaseException) -> _SerializedException:
++    return _SerializedException(exc)
++
++
++def _safe_exception_state(state: dict[str, Any]) -> dict[str, Any]:
++    result: dict[str, Any] = {}
++    for name, value in state.items():
++        if name in _EXCEPTION_STATE_ATTRS_TO_DROP or isinstance(value, types.FrameType):
++            result[name] = None
++        elif name == "inner_exception" and isinstance(value, BaseException):
++            result[name] = _safe_inner_exception(value)
++        else:
++            result[name] = value
++    return result
++
++
++def _reconstruct_torch_dynamo_exception(
++    exc_type: type[TorchDynamoException], args: tuple[Any, ...]
++) -> TorchDynamoException:
++    exc = exc_type.__new__(exc_type)
++    BaseException.__init__(exc, *args)
++    return exc
++
++
+ class TorchDynamoException(RuntimeError):
+     """Base exception class for all TorchDynamo-specific exceptions.
+ 
+@@ -85,6 +131,20 @@ def __init__(self, *args: Any, **kwargs: Any) -> None:
+         self._torch_dynamo_tracer_output: DynamoTracerOutput | None = None
+         self.frame_exec_strategy: FrameExecStrategy | None = None
+ 
++    def __reduce__(self) -> tuple[Any, ...]:
++        return (
++            _reconstruct_torch_dynamo_exception,
++            (type(self), _safe_exception_args(self.args)),
++            self.__getstate__(),
++        )
++
++    def __getstate__(self) -> dict[str, Any]:
++        return _safe_exception_state(self.__dict__)
++
++    def __setstate__(self, state: dict[str, Any] | None, /) -> None:
++        if state is not None:
++            self.__dict__.update(state)
++
+ 
+ class InternalTorchDynamoError(TorchDynamoException):
+     pass

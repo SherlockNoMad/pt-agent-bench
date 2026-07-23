@@ -1,0 +1,64 @@
+diff --git a/test/test_numpy_interop.py b/test/test_numpy_interop.py
+index e737dbfa246cc..b66da5ea1381c 100644
+--- a/test/test_numpy_interop.py
++++ b/test/test_numpy_interop.py
+@@ -3,6 +3,7 @@
+ # Owner(s): ["module: numpy"]
+ 
+ import sys
++import warnings
+ from itertools import product
+ from unittest import skipIf
+ 
+@@ -485,6 +486,22 @@ def test_numpy_array_interface(self, device):
+             for i in range(len(x)):
+                 self.assertEqual(geq2_x[i], geq2_array[i])
+ 
++    @onlyCPU
++    def test_array_wrap_no_deprecation_warning(self, device):
++        # NumPy 2 calls __array_wrap__ with extra `context` and
++        # `return_scalar` arguments and emits a DeprecationWarning when they
++        # are not accepted. See https://github.com/pytorch/pytorch/issues/180657
++        x = torch.arange(10)
++        with warnings.catch_warnings():
++            warnings.simplefilter("error", DeprecationWarning)
++            # np.delete dispatches through __array_wrap__ on the result.
++            result = np.delete(x, 0)
++        self.assertIsInstance(result, torch.Tensor)
++        self.assertEqual(result, torch.arange(1, 10))
++        # Calling directly with the NumPy 2 signature must also be accepted.
++        wrapped = x.__array_wrap__(np.arange(10), None, False)
++        self.assertIsInstance(wrapped, torch.Tensor)
++
+     @onlyCPU
+     def test_multiplication_numpy_scalar(self, device) -> None:
+         for np_dtype in [
+diff --git a/torch/_tensor.py b/torch/_tensor.py
+index ffd43a7873287..a29df464c0bc3 100644
+--- a/torch/_tensor.py
++++ b/torch/_tensor.py
+@@ -1253,7 +1253,10 @@ def __array__(self, dtype=None):
+ 
+     # Wrap Numpy array again in a suitable tensor when done, to support e.g.
+     # `numpy.sin(tensor) -> tensor` or `numpy.greater(tensor, 0) -> ByteTensor`
+-    def __array_wrap__(self, array):
++    # NumPy 2 passes `context` and `return_scalar`; torch has no scalars and
++    # does not need the context, so both are accepted and ignored. Declaring
++    # them avoids a NumPy 2 DeprecationWarning about the old call signature.
++    def __array_wrap__(self, array, context=None, return_scalar=False):
+         if has_torch_function_unary(self):
+             return handle_torch_function(
+                 Tensor.__array_wrap__, (self,), self, array=array
+diff --git a/torch/overrides.py b/torch/overrides.py
+index b6f0afa5b1b6c..ae648db5a67cc 100644
+--- a/torch/overrides.py
++++ b/torch/overrides.py
+@@ -1341,7 +1341,7 @@ def get_testing_overrides() -> dict[Callable, Callable]:
+         Tensor.__mod__: lambda self, other: -1,
+         Tensor.__rmod__: lambda self, other: -1,
+         Tensor.__imod__: lambda self, other: -1,
+-        Tensor.__array_wrap__: lambda self, array: -1,
++        Tensor.__array_wrap__: lambda self, array, context=None, return_scalar=False: -1,
+         Tensor.__getitem__: lambda self, idx: -1,
+         Tensor.__deepcopy__: lambda self, memo: -1,
+         Tensor.__int__: lambda self: -1,

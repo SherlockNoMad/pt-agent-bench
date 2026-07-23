@@ -1,0 +1,329 @@
+diff --git a/test/export/test_draft_export.py b/test/export/test_draft_export.py
+index bd2920566b63d..c7b6555caffac 100644
+--- a/test/export/test_draft_export.py
++++ b/test/export/test_draft_export.py
+@@ -98,6 +98,28 @@ def patched_export(*args, **kwargs):
+         self.assertEqual(getattr(second_dim, "max", None), first_dim.max)
+         self.assertIn("AUTO", repr(second_dim))
+ 
++    def test_shared_storage_parameters_with_offset(self):
++        class M(torch.nn.Module):
++            def __init__(self):
++                super().__init__()
++                base = torch.randn(12)
++                self.p0 = torch.nn.Parameter(base[:6].view(2, 3))
++                self.p1 = torch.nn.Parameter(base[6:].view(2, 3))
++
++            def forward(self, x):
++                return x + self.p0.sum() + self.p1.sum()
++
++        mod = M()
++        x = torch.randn(2, 3)
++
++        ep = draft_export(
++            mod,
++            (x,),
++            dynamic_shapes={"x": {0: Dim("batch", min=1, max=4)}},
++        )
++        self.assertTrue(ep._report.successful())
++        self.assertEqual(ep.module()(x), mod(x))
++
+     def test_missing_meta_kernel_custom_op_basic(self):
+         with torch.library._scoped_library("mylib", "FRAGMENT"):
+ 
+diff --git a/test/test_fake_tensor.py b/test/test_fake_tensor.py
+index a4fd56fb1e2d0..c22440c3bdd90 100644
+--- a/test/test_fake_tensor.py
++++ b/test/test_fake_tensor.py
+@@ -2413,6 +2413,110 @@ def test_separate_tensor_storages_non_view(self):
+         self.assertEqual(len(converter.tensor_memo), 0)
+         self.assertEqual(len(converter.meta_converter.storage_memo), 0)
+ 
++    def test_parameter_views_keep_full_storage(self):
++        base = torch.arange(12, dtype=torch.float16)
++        x = torch.nn.Parameter(base[:6].view(2, 3))
++        y = torch.nn.Parameter(base[6:].view(2, 3))
++        self.assertFalse(x._is_view())
++        self.assertFalse(y._is_view())
++
++        mode = FakeTensorMode()
++        x_conv = mode.from_tensor(x, static_shapes=True)
++        y_conv = mode.from_tensor(y, static_shapes=True)
++
++        self.assertEqual(torch._C._storage_id(x_conv), torch._C._storage_id(y_conv))
++        self.assertEqual(
++            x_conv.untyped_storage().nbytes(), base.untyped_storage().nbytes()
++        )
++        self.assertEqual(y_conv.storage_offset(), y.storage_offset())
++        if torch._functorch.config.fake_tensor_propagate_real_tensors:
++            self.assertEqual(
++                x_conv.real_tensor.untyped_storage().nbytes(),
++                base.untyped_storage().nbytes(),
++            )
++            self.assertEqual(y_conv.real_tensor.storage_offset(), y.storage_offset())
++            self.assertEqual(x_conv.real_tensor, x)
++            self.assertEqual(y_conv.real_tensor, y)
++
++    def test_parameter_views_keep_full_storage_symbolic_propagate_real(self):
++        base = torch.arange(12, dtype=torch.float16)
++        x = torch.nn.Parameter(base[:6].view(2, 3))
++        y = torch.nn.Parameter(base[6:].view(2, 3))
++
++        with torch._functorch.config.patch(fake_tensor_propagate_real_tensors=True):
++            mode = FakeTensorMode(shape_env=ShapeEnv())
++            x_conv = mode.from_tensor(x)
++            y_conv = mode.from_tensor(y)
++
++        self.assertEqual(torch._C._storage_id(x_conv), torch._C._storage_id(y_conv))
++        self.assertEqual(
++            x_conv.real_tensor.untyped_storage().nbytes(),
++            base.untyped_storage().nbytes(),
++        )
++        self.assertEqual(
++            y_conv.real_tensor.untyped_storage().nbytes(),
++            base.untyped_storage().nbytes(),
++        )
++        self.assertEqual(y_conv.real_tensor.storage_offset(), y.storage_offset())
++        self.assertEqual(x_conv.real_tensor, x)
++        self.assertEqual(y_conv.real_tensor, y)
++
++    def test_strided_parameter_views_keep_real_storage_data(self):
++        base = torch.arange(11, dtype=torch.float32)
++        x = torch.nn.Parameter(base[::2])
++        y = torch.nn.Parameter(base[1::2])
++        self.assertFalse(x._is_view())
++        self.assertFalse(y._is_view())
++
++        with torch._functorch.config.patch(fake_tensor_propagate_real_tensors=True):
++            mode = FakeTensorMode()
++            x_conv = mode.from_tensor(x, static_shapes=True)
++            y_conv = mode.from_tensor(y, static_shapes=True)
++
++        self.assertEqual(torch._C._storage_id(x_conv), torch._C._storage_id(y_conv))
++        self.assertEqual(x_conv.real_tensor, x)
++        self.assertEqual(y_conv.real_tensor, y)
++
++    def test_functional_tensor_offset_storage_copy(self):
++        from torch._subclasses.functional_tensor import (
++            FunctionalTensor,
++            FunctionalTensorMode,
++        )
++
++        base = torch.arange(12, dtype=torch.float32)
++        y = torch.nn.Parameter(base[6:].view(2, 3))
++
++        with torch._functorch.config.patch(fake_tensor_propagate_real_tensors=True):
++            mode = FakeTensorMode()
++            y_fake = mode.from_tensor(y, static_shapes=True)
++            with FunctionalTensorMode():
++                y_functional = FunctionalTensor.to_functional(y_fake)
++                refake_mode = FakeTensorMode()
++                y_refake = refake_mode.from_tensor(y_functional, static_shapes=True)
++
++        self.assertEqual(y_refake.storage_offset(), y.storage_offset())
++        self.assertEqual(y_refake.real_tensor, y)
++
++    def test_refake_unbacked_storage_static_shapes(self):
++        with torch._functorch.config.patch(fake_tensor_propagate_real_tensors=False):
++            shape_env = ShapeEnv()
++            fake_mode = FakeTensorMode(shape_env=shape_env)
++            with shape_env.ignore_fresh_unbacked_symbols():
++                fake = fake_mode.from_tensor(
++                    torch.randn(2, 3),
++                    source=LocalSource("x", is_input=True),
++                    symbolic_context=StatelessSymbolicContext(
++                        dynamic_sizes=[DimDynamic.UNBACKED, DimDynamic.STATIC],
++                        constraint_sizes=[None, None],
++                    ),
++                )
++
++            refake_mode = FakeTensorMode()
++            refake = refake_mode.from_tensor(fake, static_shapes=True)
++
++        self.assertTrue(free_unbacked_symbols(refake.shape[0]))
++        self.assertEqual(refake.shape[1], 3)
++
+     def test_dead_weak_ref(self):
+         x = torch.rand(2, 2, 2)
+         y = x[0]
+diff --git a/torch/_subclasses/meta_utils.py b/torch/_subclasses/meta_utils.py
+index 44a4f82b00945..dd19d9b39b608 100644
+--- a/torch/_subclasses/meta_utils.py
++++ b/torch/_subclasses/meta_utils.py
+@@ -65,6 +65,26 @@ def _is_fake_tensor(t: object) -> TypeIs[FakeTensor]:
+     return isinstance(t, FakeTensor)
+ 
+ 
++def _unwrap_python_functional_tensor(t: torch.Tensor) -> torch.Tensor:
++    # Avoid a top-level import cycle: functional_tensor imports this module.
++    from torch._subclasses.functional_tensor import FunctionalTensor
++
++    if isinstance(t, FunctionalTensor):
++        return t.from_functional()
++    return t
++
++
++def _clone_real_storage_from_tensor(t: torch.Tensor) -> torch.UntypedStorage:
++    t = _unwrap_python_functional_tensor(t)
++    if _is_fake_tensor(t):
++        if t.real_tensor is None:
++            raise AssertionError(
++                "t.real_tensor must not be None when copy_data is True"
++            )
++        t = t.real_tensor
++    return t.untyped_storage().clone()
++
++
+ DimList = list
+ _TensorLikeT = TypeVar("_TensorLikeT", "MetaTensorDesc[Any]", torch.Tensor)
+ _T = TypeVar("_T")
+@@ -264,14 +284,18 @@ def get_storage_id(self, s: torch.UntypedStorage) -> MetaStorageId:
+         return self.lookup_storage[s]
+ 
+     def describe_storage(
+-        self, s: torch.UntypedStorage, *, trace: bool = False
++        self,
++        s: torch.UntypedStorage,
++        *,
++        data: torch.Tensor | None = None,
++        trace: bool = False,
+     ) -> MetaStorageDesc:
+         r = MetaStorageDesc(
+             id=self.get_storage_id(s),
+             size=s.size(),
+             # NB: We don't do the copy yet; copy happens when we start
+             # creating the new storages
+-            data=s if self.copy_data else None,
++            data=data if data is not None else s if self.copy_data else None,
+         )
+         if trace and r.id not in self.traced_storages:
+             trace_structured(
+@@ -284,6 +308,7 @@ def describe_storage(
+     def describe_tensor(
+         self, t: torch.Tensor, *, recurse: bool = True, trace: bool = False
+     ) -> MetaTensorDesc[Any]:
++        data = _unwrap_python_functional_tensor(t) if self.copy_data else None
+         is_leaf = safe_is_leaf(t)
+         is_view = t._is_view()
+         is_sparse = t.is_sparse
+@@ -314,7 +339,7 @@ def describe_tensor(
+         ):
+             # NB: We actually don't use storage to do views, but might as well
+             # put it in for accuracy
+-            storage = self.describe_storage(t.untyped_storage(), trace=trace)
++            storage = self.describe_storage(t.untyped_storage(), data=data, trace=trace)
+             storage_offset = t.storage_offset()  # type: ignore[assignment]
+ 
+         stride = None
+@@ -509,7 +534,7 @@ def describe_tensor(
+             functorch_stack=maybe_functorch_stack,
+             autograd_meta_from=autograd_meta_from,
+             current_level=current_level,
+-            data=t if self.copy_data else None,
++            data=data,
+         )
+         if trace and r.id not in self.traced_tensors:
+             trace_structured(
+@@ -526,7 +551,7 @@ class MetaStorageDesc:
+     size: int
+     # NB: this is only populated with copy_data True, it is not directly
+     # serializable in JSON, you want to do something special here anyway
+-    data: torch.UntypedStorage | None
++    data: torch.UntypedStorage | torch.Tensor | None
+ 
+     def as_json(self, describer_id: _DescriberId) -> dict[str, object]:
+         metadata: dict[str, object] = {
+@@ -948,7 +973,11 @@ def meta_storage(
+                         raise AssertionError(
+                             "s.data must not be None when copy_data is True"
+                         )
+-                    _set_real_storage(r_s, s.data.clone())
++                    if isinstance(s.data, torch.Tensor):
++                        real_storage = _clone_real_storage_from_tensor(s.data)
++                    else:
++                        real_storage = s.data.clone()
++                    _set_real_storage(r_s, real_storage)
+             self.set_storage_memo(s, r_s)
+             return r_s
+         else:
+@@ -2076,6 +2105,22 @@ def is_c_of_r(
+                         sym_eq,
+                     )
+ 
++                    storage_needs_resize = False
++                    source_storage_size = s.size
++                    source_storage_is_zero = (
++                        isinstance(source_storage_size, int)
++                        and source_storage_size == 0
++                    )
++                    if not r.is_nested:
++                        r_storage = r.untyped_storage()
++                        r_storage_size = r_storage.size()
++                        if isinstance(r_storage_size, int) and isinstance(
++                            source_storage_size, int
++                        ):
++                            storage_needs_resize = (
++                                source_storage_size != 0
++                                and r_storage_size < source_storage_size
++                            )
+                     if s.id not in self.storage_memo and (
+                         r.is_nested
+                         or (
+@@ -2083,6 +2128,18 @@ def is_c_of_r(
+                             and guard_or_false(r.storage_offset() == storage_offset)
+                         )
+                     ):
++                        if not r.is_nested:
++                            # The freshly allocated tensor storage can stand in
++                            # for the source storage only if it covers the whole
++                            # storage. Parameters made from views are not
++                            # autograd views, but can still share a larger
++                            # storage with later parameters. Leave symbolic
++                            # sizes alone; this preserves the fast path for
++                            # dynamic inputs without adding storage-size guards.
++                            # Zero-sized source storages are handled by the
++                            # resize_(0) below.
++                            if storage_needs_resize:
++                                r.untyped_storage().resize_(s.size)
+                         # You're normal and happy, install the fresh storage into the memo
+                         self.set_storage_memo(s, r.untyped_storage())
+                         if self.copy_data:
+@@ -2092,9 +2149,35 @@ def is_c_of_r(
+                                 raise AssertionError(
+                                     "r.real_tensor must not be None when copy_data is True"
+                                 )
+-                            _set_real_storage(
+-                                r.untyped_storage(), r.real_tensor.untyped_storage()
+-                            )
++                            if source_storage_is_zero:
++                                _set_real_storage(
++                                    r.untyped_storage(),
++                                    r.real_tensor.untyped_storage(),
++                                )
++                            else:
++                                if t.size is None:
++                                    raise AssertionError(
++                                        "t.size must not be None when copy_data is True"
++                                    )
++                                if t.stride is None:
++                                    raise AssertionError(
++                                        "t.stride must not be None when copy_data is True"
++                                    )
++                                if t.data is None:
++                                    raise AssertionError(
++                                        "t.data must not be None when copy_data is True"
++                                    )
++                                with torch.no_grad(), no_dispatch():
++                                    real_storage = _clone_real_storage_from_tensor(
++                                        t.data
++                                    )
++                                    _set_real_storage(r.untyped_storage(), real_storage)
++                                    r.real_tensor.set_(
++                                        real_storage,
++                                        t.storage_offset,
++                                        t.size,
++                                        t.stride,
++                                    )
+                     else:
+                         # You're in crazy town; somehow you gave us a tensor
+                         # that wasn't a view, but had nonzero storage offset,

@@ -1,0 +1,46 @@
+{
+  "instance_id": "pytorch__pytorch-189010",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "188866"
+  ],
+  "pull_number": 189010,
+  "base_commit": "24dc1d76e7da87d4a1d0d93702bf4551fa9b647a",
+  "problem_statement": "[dynamo] TVM backend fails to import with all pip-installable TVM versions (relay removed in TVM 0.20)\n\n### \ud83d\udc1b Describe the bug\n\nThe `tvm` dynamo backend depends on `tvm.relay` and `tvm.contrib.graph_executor`, removed upstream in TVM v0.20. PyPI only offers `apache-tvm==0.25.*` now, so every install fails at import, and the error message suggests installing apache-tvm, which cannot fix it. `tvm.meta_schedule` is also gone, so the tuning paths have no equivalent.\n\n```python\nimport torch\n\ntorch.compile(lambda x: x + 1, backend=\"tvm\")(torch.randn(2))\n```\n\nTVM 0.25 ships its own working dynamo backend (`tvm.relax.frontend.torch.relax_dynamo`, verified locally with `torch.compile`). Should this backend delegate to it, or be deprecated?\n\n### Error logs\n\n```\nBackendCompilerFailed: backend='tvm' raised:\nImportError: cannot import name 'relay' from 'tvm'\n```\n\n(re-raised as \"Please install apache-tvm to use the tvm backend.\")\n\n### Versions\n\n```\nPyTorch version: 2.14.0a0+gitc5bf344\nOS: macOS 26.5.2 (arm64)\nClang version: 17.0.0 (clang-1700.0.13.5)\nPython version: 3.11.13 (64-bit runtime)\nIs CUDA available: False\nCPU: Apple M1 Max\n\n[pip3] numpy==2.4.6\n[pip3] torch==2.14.0a0+gitc5bf344\n[pip3] apache-tvm==0.25.0.post1\n```\n\n\ncc @bdhirsh @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @kadeng @amjames @jataylo @azahed98",
+  "patch": "diff --git a/torch/_dynamo/backends/tvm.py b/torch/_dynamo/backends/tvm.py\nindex c90f2ca42f88f..4e061d99501d9 100644\n--- a/torch/_dynamo/backends/tvm.py\n+++ b/torch/_dynamo/backends/tvm.py\n@@ -52,15 +52,51 @@ def tvm(\n     if options is None:\n         options = MappingProxyType({\"scheduler\": None, \"trials\": 20000, \"opt_level\": 3})\n     try:\n-        import tvm  # type: ignore[import]\n-        from tvm import relay  # type: ignore[import]\n-        from tvm.contrib import graph_executor  # type: ignore[import]\n+        import tvm  # type: ignore[import]  # noqa: F401\n     except ImportError as e:\n         raise ImportError(\n             \"Please install apache-tvm to use the tvm backend. \"\n             \"See https://tvm.apache.org/docs/install/index.html for instructions.\"\n         ) from e\n \n+    # relay was removed in TVM 0.20; newer pip wheels only ship the relax\n+    # frontend, so dispatch on whichever API the installed TVM provides.\n+    if importlib.util.find_spec(\"tvm.relay\") is not None:\n+        return _tvm_relay_compile(gm, example_inputs, options)\n+    if importlib.util.find_spec(\"tvm.relax.frontend.torch\") is not None:\n+        return _tvm_relax_compile(gm, example_inputs, options)\n+    raise ImportError(\n+        \"The installed apache-tvm provides neither the legacy relay frontend nor \"\n+        \"the relax torch frontend, so the tvm backend cannot compile this graph.\"\n+    )\n+\n+\n+def _tvm_relax_compile(\n+    gm: fx.GraphModule,\n+    example_inputs: list[torch.Tensor],\n+    options: MappingProxyType[str, Any],\n+) -> Callable[..., Any]:\n+    from tvm.relax.frontend.torch import relax_dynamo  # type: ignore[import]\n+\n+    scheduler = options.get(\"scheduler\", None) or os.environ.get(\"TVM_SCHEDULER\", None)\n+    if scheduler in (\"auto_scheduler\", \"meta_schedule\"):\n+        log.warning(\n+            \"scheduler=%s has no equivalent in the relax TVM backend; \"\n+            \"falling back to the default relax pipeline.\",\n+            scheduler,\n+        )\n+    return relax_dynamo()(gm, example_inputs)\n+\n+\n+def _tvm_relay_compile(\n+    gm: fx.GraphModule,\n+    example_inputs: list[torch.Tensor],\n+    options: MappingProxyType[str, Any],\n+) -> Callable[..., Any]:\n+    import tvm  # type: ignore[import]\n+    from tvm import relay  # type: ignore[import]\n+    from tvm.contrib import graph_executor  # type: ignore[import]\n+\n     jit_mod = torch.jit.trace(gm, example_inputs)\n     device = device_from_inputs(example_inputs)\n     shape_list = [(f\"inp_{idx}\", i.shape) for idx, i in enumerate(example_inputs)]\n",
+  "test_patch": "diff --git a/test/dynamo/test_backends.py b/test/dynamo/test_backends.py\nindex b2b564e8db9c7..7d60f2d05b38e 100644\n--- a/test/dynamo/test_backends.py\n+++ b/test/dynamo/test_backends.py\n@@ -171,6 +171,37 @@ def test_tvm_scheduler_backends(self, device):\n             with patch.dict(sys.modules, {\"tvm\": None}):\n                 self.assertRaises(ImportError, backend, gm, [torch.randn(2)])\n \n+    def test_tvm_dispatches_relay_or_relax(self, device):\n+        import torch._dynamo.backends.tvm as tvm_backend\n+\n+        gm = torch.fx.symbolic_trace(lambda x: x + 1)\n+        sentinel = object()\n+\n+        def find_spec(present):\n+            return lambda name: MagicMock() if name == present else None\n+\n+        with (\n+            patch.dict(sys.modules, {\"tvm\": MagicMock()}),\n+            patch.object(\n+                tvm_backend, \"_tvm_relay_compile\", return_value=sentinel\n+            ) as relay,\n+            patch.object(\n+                tvm_backend, \"_tvm_relax_compile\", return_value=sentinel\n+            ) as relax,\n+        ):\n+            with patch(\"importlib.util.find_spec\", side_effect=find_spec(\"tvm.relay\")):\n+                self.assertIs(tvm_backend.tvm(gm, [torch.randn(2)]), sentinel)\n+            relay.assert_called_once()\n+            relax.assert_not_called()\n+\n+            with patch(\n+                \"importlib.util.find_spec\",\n+                side_effect=find_spec(\"tvm.relax.frontend.torch\"),\n+            ):\n+                self.assertIs(tvm_backend.tvm(gm, [torch.randn(2)]), sentinel)\n+            relax.assert_called_once()\n+            relay.assert_called_once()\n+\n     @onlyHPU\n     def test_intel_gaudi_backend(self, device):\n         self._check_backend_works(\"hpu_backend\", device)\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_tvm_dispatches_relay_or_relax_cpu"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_backends.py::NormalizeIRTests::test_inplace_normalize",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_aot_autograd_api",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_graph_freeze",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_recompilation",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_cudagraphs_backend_accepts_extra_kwargs",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_custom_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_register_backend_api",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend_explicit_override",
+    "test/dynamo/test_backends.py::TestExplainWithBackend::test_explain_with_backend",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_decomp_partition_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_ts_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_noexcept_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_runtime_use_cpu"
+  ],
+  "test_files": [
+    "test/dynamo/test_backends.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/backends/tvm.py"
+  ],
+  "created_at": "2026-07-11T07:37:08Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

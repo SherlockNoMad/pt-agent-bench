@@ -1,0 +1,76 @@
+diff --git a/test/dynamo/test_functions.py b/test/dynamo/test_functions.py
+index 2327f346f9a84..0bc2799636628 100644
+--- a/test/dynamo/test_functions.py
++++ b/test/dynamo/test_functions.py
+@@ -6087,6 +6087,56 @@ def func_scalar_param():
+         self.assertEqual(result_a, torch.full((2,), 3.14, dtype=torch.float32))
+         self.assertEqual(result_b, torch.full((2,), 2.71, dtype=torch.float32))
+ 
++    def test_full_with_parameter_fill_value_raises(self):
++        class Mod(torch.nn.Module):
++            def __init__(self) -> None:
++                super().__init__()
++                self.fill_value = torch.nn.Parameter(torch.tensor(2.5))
++
++            def forward(self, x):
++                return torch.full((x.shape[0], x.shape[1], 2), self.fill_value)
++
++        mod = Mod()
++        x = torch.randn(3, 4)
++
++        with self.assertRaises(TypeError):
++            mod(x)
++
++        opt_mod = torch.compile(mod, backend="eager", fullgraph=True)
++        with self.assertRaises(torch._dynamo.exc.Unsupported):
++            opt_mod(x)
++
++    def test_full_with_parameter_subclass_fill_value_raises(self):
++        class MyParam(torch.nn.Parameter):
++            pass
++
++        def func(x):
++            return torch.full((2,), x)
++
++        x = MyParam(torch.tensor(2.5))
++
++        with self.assertRaises(TypeError):
++            func(x)
++
++        func_compiled = torch.compile(func, backend="eager", fullgraph=True)
++        with self.assertRaises(torch._dynamo.exc.Unsupported):
++            func_compiled(x)
++
++    def test_full_with_tensor_subclass_fill_value(self):
++        class MyTensor(torch.Tensor):
++            pass
++
++        def func(x):
++            return torch.full((2,), x)
++
++        x = torch.tensor(5.0).as_subclass(MyTensor)
++        expected = func(x)
++
++        func_compiled = torch.compile(func, backend="eager", fullgraph=True)
++        result = func_compiled(x)
++
++        self.assertEqual(result, expected)
++
+ 
+ instantiate_parametrized_tests(FunctionTests)
+ instantiate_parametrized_tests(DefaultsTests)
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index 30d3caa4897d8..8e6531318a3b3 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -1596,7 +1596,9 @@ def handle_full(
+             fill_value: VariableTracker,
+             **kwargs: VariableTracker,
+         ) -> VariableTracker | None:
+-            if fill_value.is_tensor():
++            if fill_value.is_tensor() and not issubclass(
++                fill_value.python_type(), torch.nn.Parameter
++            ):
+                 # Decompose: create empty tensor and fill it
+                 # This avoids the scalar extraction at compile time
+                 empty_result = TorchInGraphFunctionVariable(torch.empty).call_function(

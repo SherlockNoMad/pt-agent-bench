@@ -1,0 +1,131 @@
+diff --git a/test/test_logging.py b/test/test_logging.py
+index ae9760e25c410..85926542d6424 100644
+--- a/test/test_logging.py
++++ b/test/test_logging.py
+@@ -3,6 +3,8 @@
+ import glob
+ import logging
+ import os
++import subprocess
++import sys
+ import tempfile
+ 
+ import torch
+@@ -12,6 +14,78 @@
+ 
+ 
+ class LoggingTest(TestCase):
++    def test_backend_autoload_registers_torch_logs_before_env_parse(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            package_dir = os.path.join(tmpdir, "torch_issue173759_backend")
++            dist_info_dir = os.path.join(
++                tmpdir, "torch_issue173759_backend-0.0.0.dist-info"
++            )
++            os.mkdir(package_dir)
++            os.mkdir(dist_info_dir)
++
++            with open(os.path.join(package_dir, "__init__.py"), "w") as f:
++                f.write(
++                    "import logging\n"
++                    "from torch._logging._internal import "
++                    "getArtifactLogger, register_artifact, register_log\n"
++                    "register_log('issue173759_component', "
++                    "'torch_issue173759_backend')\n"
++                    "register_artifact('issue173759_artifact', "
++                    "'test artifact')\n"
++                    "def _autoload():\n"
++                    "    pass\n"
++                    "def emit_logs():\n"
++                    "    logging.getLogger(__name__).info("
++                    "'issue173759 component log')\n"
++                    "    getArtifactLogger("
++                    "__name__, 'issue173759_artifact').info("
++                    "'issue173759 artifact log')\n"
++                )
++
++            with open(os.path.join(dist_info_dir, "METADATA"), "w") as f:
++                f.write(
++                    "Metadata-Version: 2.1\n"
++                    "Name: torch-issue173759-backend\n"
++                    "Version: 0.0.0\n"
++                )
++
++            with open(os.path.join(dist_info_dir, "entry_points.txt"), "w") as f:
++                f.write(
++                    "[torch.backends]\n"
++                    "issue173759 = torch_issue173759_backend:_autoload\n"
++                )
++
++            env = os.environ.copy()
++            env["PYTHONPATH"] = os.pathsep.join(
++                filter(None, [tmpdir, env.get("PYTHONPATH", "")])
++            )
++            env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "1"
++            env["TORCH_LOGS"] = "+issue173759_component,+issue173759_artifact"
++            env["TORCH_LOGS_FORMAT"] = "%(message)s"
++
++            pytorch_root = os.path.dirname(os.path.dirname(torch.__file__))
++            result = subprocess.run(
++                [
++                    sys.executable,
++                    "-c",
++                    "import torch; "
++                    "from torch_issue173759_backend import emit_logs; "
++                    "emit_logs()",
++                ],
++                cwd=pytorch_root,
++                env=env,
++                capture_output=True,
++                text=True,
++            )
++
++            self.assertEqual(
++                result.returncode,
++                0,
++                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
++            )
++            self.assertIn("issue173759 component log", result.stderr)
++            self.assertIn("issue173759 artifact log", result.stderr)
++
+     def testApiUsage(self):
+         """
+         This test verifies that api usage logging is not triggered via static
+diff --git a/torch/__init__.py b/torch/__init__.py
+index 620bb461651ce..177683eded4a4 100644
+--- a/torch/__init__.py
++++ b/torch/__init__.py
+@@ -3008,12 +3008,6 @@ def _constrain_as_size(
+     torch.sym_constrain_range_for_size(symbol, min=min, max=max)
+ 
+ 
+-from torch import _logging
+-
+-
+-_logging._init_logs()
+-
+-
+ def _import_device_backends():
+     """
+     Leverage the Python plugin mechanism to load out-of-the-tree device extensions.
+@@ -3070,11 +3064,18 @@ def _as_tensor_fullprec(t):
+         return torch.as_tensor(t)
+ 
+ 
+-# `_import_device_backends` should be kept at the end to ensure
+-# all the other functions in this module that may be accessed by
+-# an autoloaded backend are defined
++# `_import_device_backends` should run after the definitions above to ensure
++# all the other functions in this module that may be accessed by an autoloaded
++# backend are defined.
+ if _is_device_backend_autoload_enabled():
+     _import_device_backends()
+ 
++from torch import _logging
++
++
++# Keep `TORCH_LOGS` initialization after backend autoload so backends can
++# register their log names before `TORCH_LOGS` is parsed and validated.
++_logging._init_logs()
++
+ # Register all registered custom / override ops in torch/_native
+ import torch._native

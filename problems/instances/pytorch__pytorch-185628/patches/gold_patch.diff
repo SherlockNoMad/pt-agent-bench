@@ -1,0 +1,12 @@
+diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py
+index 6103572fdcb1c..519e2c6683e93 100644
+--- a/torch/_dynamo/trace_rules.py
++++ b/torch/_dynamo/trace_rules.py
+@@ -3503,6 +3503,7 @@ def _module_dir(m: types.ModuleType) -> str | None:
+     "torch._tensor",
+     "torch.amp.autocast_mode",
+     "torch.ao.nn",
++    "torch.ao.quantization.fx._decomposed",
+     "torch.autograd.function",
+     "torch.backends.cuda",
+     "torch.cuda.amp.autocast_mode",

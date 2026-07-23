@@ -1,0 +1,66 @@
+diff --git a/test/functorch/test_eager_transforms.py b/test/functorch/test_eager_transforms.py
+index 35164fe8ea3b9..794983ad02f51 100644
+--- a/test/functorch/test_eager_transforms.py
++++ b/test/functorch/test_eager_transforms.py
+@@ -5403,6 +5403,25 @@ def predict(params_and_buffers, x):
+         actual = opt_fn(params_and_buffers, x)
+         self.assertEqual(actual, expected)
+ 
++    @parametrize("backend", ["eager", "aot_eager"])
++    def test_compile_dynamic_grad_stride_slice_mha(self, device, backend):
++        # Regression test for https://github.com/pytorch/pytorch/issues/181305
++        linear = nn.Linear(3, 3).to(device).eval()
++
++        def model(x):
++            y = x[:, ::2, :, :]
++            y = y.mean(dim=0)
++            y = linear(y)
++            return y.mean()
++
++        x = torch.randn(4, 8, 2, 3, device=device)
++        expected = grad(model)(x)
++
++        torch._dynamo.reset()
++        compiled = torch.compile(grad(model), dynamic=True, backend=backend)
++        result = compiled(x)
++        self.assertEqual(result, expected)
++
+     # torch.compile is not supported on Windows
+     @torch._dynamo.config.patch(suppress_errors=False)
+     def test_grad_deprecated_api(self, device):
+diff --git a/torch/_subclasses/functional_tensor.py b/torch/_subclasses/functional_tensor.py
+index 19ee1756ca513..c81bdf7f74512 100644
+--- a/torch/_subclasses/functional_tensor.py
++++ b/torch/_subclasses/functional_tensor.py
+@@ -269,6 +269,13 @@ def __torch_dispatch__(  # type: ignore[override]
+                 raise AssertionError("Expected 1 arg with FunctionalTensor")
+ 
+             return func(torch._from_functional_tensor(args[0].elem))
++        if func is torch.ops.aten.detach.default:
++            # detach can reach this dispatch when no FunctionalTensorMode is active
++            # (e.g. snapshot_fake under ProxyTorchDispatchMode). Returning self is safe:
++            # autograd has already run above this layer, so detach has no effect here,
++            # and we must avoid falling through to the "on its own" RuntimeError below.
++            if len(args) == 1 and isinstance(args[0], FunctionalTensor):
++                return args[0]
+         # Originally I tried to implement my subclass without giving it a torch_dispatch, but I gave up:
+         # - _make_wrapper_subclass requires a __torch_dispatch__
+         # - If we want to use _make_subclass(), we have a problem: the subclass will share a TensorImpl with the inner tensor,
+@@ -580,7 +587,16 @@ def unwrap(x: FunctionalTensor) -> torch.Tensor:
+                     # Sometimes these functions cannot be directly dispatched to functionalize key
+                     # because args are sometimes not functional tensors for some reason?
+                     if func in FunctionalTensor.metadata_fns:
+-                        outs_unwrapped = func(*args_unwrapped, **kwargs_unwrapped)
++                        # With dynamic shapes, metadata ops (e.g. aten.sym_size)
++                        # on the unwrapped inner tensor re-enter Python dispatch
++                        # because symbolic sizes require Python-side evaluation.
++                        # The inner tensors don't have proxy slots (only the outer
++                        # FunctionalTensor does), so ProxyTorchDispatchMode would
++                        # store them as spurious graph constants. The metadata op
++                        # was already recorded on the FunctionalTensor by the proxy
++                        # mode above us, so we disable proxy tracing here.
++                        with torch.fx.experimental.proxy_tensor.disable_proxy_modes_tracing():
++                            outs_unwrapped = func(*args_unwrapped, **kwargs_unwrapped)
+                         outs_wrapped = pytree.tree_map_only(
+                             torch.Tensor, wrap, outs_unwrapped
+                         )

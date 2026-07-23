@@ -1,0 +1,75 @@
+diff --git a/test/dynamo/test_misc.py b/test/dynamo/test_misc.py
+index 62c7cd34a6e2d..0d3cd5a4d157c 100644
+--- a/test/dynamo/test_misc.py
++++ b/test/dynamo/test_misc.py
+@@ -2278,6 +2278,19 @@ def f(x):
+         x = torch.tensor([1.0, 2.0, 3.0])
+         self.assertEqual(f(x), x + 1)
+ 
++    def test_check_tensor_predicate_raises_clear_error(self):
++        @torch.compile(backend="eager")
++        def f(x):
++            torch._check(x > 0)
++            return torch.log(x)
++
++        with self.assertRaisesRegex(
++            TypeError, r"cond must be a bool.*torch[.]_check_tensor_all"
++        ) as cm:
++            f(torch.rand(1))
++
++        self.assertNotIn("FakeTensor", str(cm.exception))
++
+     def test_check_with_closure_constant(self):
+         @torch.compile(backend="eager", fullgraph=True)
+         def f(x):
+diff --git a/test/test_torch.py b/test/test_torch.py
+index dc1ceb58bf93c..00a2a62e4c4d2 100644
+--- a/test/test_torch.py
++++ b/test/test_torch.py
+@@ -6770,7 +6770,9 @@ def message():
+             with self.assertRaisesRegex(TypeError, 'cond must be a bool'):
+                 check_fn('wrong type')
+ 
+-            with self.assertRaisesRegex(TypeError, 'cond must be a bool'):
++            with self.assertRaisesRegex(
++                TypeError, r'cond must be a bool.*torch[.]_check_tensor_all'
++            ):
+                 check_fn(torch.tensor(True))
+ 
+     # FIXME: move to indexing test suite
+diff --git a/torch/__init__.py b/torch/__init__.py
+index ea1ea3d6d079f..c174e8e1ef112 100644
+--- a/torch/__init__.py
++++ b/torch/__init__.py
+@@ -1716,6 +1716,12 @@ def _check_with(
+     message: _Callable[[], str],
+ ):
+     if not isinstance(cond, (builtins.bool, SymBool)):
++        if isinstance(cond, torch.Tensor):
++            raise TypeError(
++                "cond must be a bool, but got a Tensor. "
++                "For tensor conditions, use torch._check_tensor_all() "
++                "to assert that all elements are true."
++            )
+         raise TypeError(f"cond must be a bool, but got {type(cond)}")
+ 
+     from torch.fx.experimental.symbolic_shapes import expect_true
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index 34277df783839..6da3675bb722d 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -2461,6 +2461,14 @@ def check_impl(
+                     f"{self.value.__name__}() missing 1 required positional argument: 'cond'",
+                 )
+ 
++            if predicate_vt.is_tensor():
++                raise_type_error(
++                    tx,
++                    "cond must be a bool, but got a Tensor. "
++                    "For tensor conditions, use torch._check_tensor_all() "
++                    "to assert that all elements are true.",
++                )
++
+             message_eager = None
+             message_graph_proxy = None
+             if message_vt is not None:

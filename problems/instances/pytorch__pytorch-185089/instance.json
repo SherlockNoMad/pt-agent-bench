@@ -1,0 +1,46 @@
+{
+  "instance_id": "pytorch__pytorch-185089",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "164555"
+  ],
+  "pull_number": 185089,
+  "base_commit": "5b84db359573e8f036d9b8117043017fb101a085",
+  "problem_statement": "[PT2.9] Unsupported: Attempted to call op with non-contiguous `out=` tensor\n\n### \ud83d\udc1b Describe the bug\n\nHi, wanted to double check because by graph break message `Unsupported: Attempted to call op with non-contiguous 'out=' tensor` I understand this as non-contiguous tensors cannot be passed to op's out=, however I see this is occurring when input tensor is being non-contiguous.\n\nIt was traceable with PT2.8, if that's expected you can close this issue automatically.\n\nThanks for feedback\n\n```python\nimport torch\n\n\nDEVICE = 'cpu'\nBACKEND = 'eager'\n\ndef fn():\n    input = torch.ones(2, 2, 2, 3, dtype=torch.bfloat16, device=DEVICE).to(memory_format=torch.channels_last)\n    output = torch.empty_like(input)\n\n    torch.add(input, input, out=output)\n    return output\n\n\ncompiled_fn = torch.compile(fn, backend=BACKEND, fullgraph=True)\n#compiled_fn = fn\nres = compiled_fn()\nprint(res)\n```\n\n### Versions\n\nPT 2.9\n\ncc @jamesr66a @chauhang @penguinwu",
+  "patch": "diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py\nindex bb814f0757aec..c9b9a845c2c1c 100644\n--- a/torch/_dynamo/variables/torch.py\n+++ b/torch/_dynamo/variables/torch.py\n@@ -133,6 +133,27 @@\n \n log = logging.getLogger(__name__)\n \n+\n+def _is_supported_out_tensor_layout(\n+    fake_out: torch.Tensor, *, false_if_dde: bool\n+) -> bool:\n+    # Functionalization can preserve standard dense memory formats, but not\n+    # arbitrary non-contiguous view strides.\n+    return (\n+        torch._prims_common.is_contiguous(fake_out, false_if_dde=false_if_dde)\n+        or torch._prims_common.is_contiguous_for_memory_format(\n+            fake_out,\n+            memory_format=torch.channels_last,\n+            false_if_dde=false_if_dde,\n+        )\n+        or torch._prims_common.is_contiguous_for_memory_format(\n+            fake_out,\n+            memory_format=torch.channels_last_3d,\n+            false_if_dde=false_if_dde,\n+        )\n+    )\n+\n+\n supported_ctx_manager_classes = dict.fromkeys(\n     [\n         torch.profiler.profiler.profile,\n@@ -3392,7 +3413,9 @@ def call_function(\n                                 *graph_break_hints.SUPPORTABLE,\n                             ],\n                         )\n-                    if not torch._prims_common.is_contiguous(fake_out):\n+                    if not _is_supported_out_tensor_layout(\n+                        fake_out, false_if_dde=False\n+                    ):\n                         # It's difficult to handle strides correctly in functionalization\n                         # when calling an out= op with a non-contiguous out argument\n                         unimplemented(\n@@ -3427,7 +3450,7 @@ def call_function(\n                             *graph_break_hints.SUPPORTABLE,\n                         ],\n                     )\n-                if not torch._prims_common.is_contiguous_or_false(fake_out):\n+                if not _is_supported_out_tensor_layout(fake_out, false_if_dde=True):\n                     # It's difficult to handle strides correctly in functionalization\n                     # when calling an out= op with a non-contiguous out argument\n                     unimplemented(\n",
+  "test_patch": "diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py\nindex ef8870027ae8d..44f91e13e9848 100644\n--- a/test/dynamo/test_repros.py\n+++ b/test/dynamo/test_repros.py\n@@ -1228,6 +1228,28 @@ def f(x, y):\n         self.assertEqual(out_ref, out_test)\n         self.assertEqual(y_ref, y_test)\n \n+    # https://github.com/pytorch/pytorch/issues/164555\n+    def test_out_overload_channels_last(self):\n+        def fn():\n+            x = torch.ones(2, 2, 2, 3, dtype=torch.bfloat16).to(\n+                memory_format=torch.channels_last\n+            )\n+            out = torch.empty_like(x)\n+\n+            torch.add(x, x, out=out)\n+            return out\n+\n+        eager_out = fn()\n+        for backend in (\"eager\", \"aot_eager\"):\n+            compiled_fn = torch.compile(fn, backend=backend, fullgraph=True)\n+            compiled_out = compiled_fn()\n+\n+            self.assertEqual(eager_out, compiled_out)\n+            self.assertEqual(eager_out.stride(), compiled_out.stride())\n+            self.assertTrue(\n+                compiled_out.is_contiguous(memory_format=torch.channels_last)\n+            )\n+\n     # https://github.com/pytorch/pytorch/issues/168381\n     def test_index_select_contiguous_with_compile(self):\n         def fn(x):\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_out_overload_channels_last"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_312_local_cell_overlap",
+    "test/dynamo/test_repros.py::ReproTests::test_Size",
+    "test/dynamo/test_repros.py::ReproTests::test_abc_setattr",
+    "test/dynamo/test_repros.py::ReproTests::test_add_sub_alpha_out",
+    "test/dynamo/test_repros.py::ReproTests::test_addr_alpha_beta_out",
+    "test/dynamo/test_repros.py::ReproTests::test_amp_foreach_fake_impl",
+    "test/dynamo/test_repros.py::ReproTests::test_aot_autograd_runtime_wrapper_prologue_profiled",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_base_with_mutation_works",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_existing_view_banned",
+    "test/dynamo/test_repros.py::ReproTests::test_attached_attribute_in_dir",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_ctx_stash_no_vc_check",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_graph_break",
+    "test/dynamo/test_repros.py::ReproTests::test_avoid_dupe_specialization",
+    "test/dynamo/test_repros.py::ReproTests::test_basic_tensor_subclass_constructor",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_encoding_clone_inputs",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_norm_act",
+    "test/dynamo/test_repros.py::ReproTests::test_batchnorm_e2e",
+    "test/dynamo/test_repros.py::ReproTests::test_bigbird_unsqueeze_inplace"
+  ],
+  "test_files": [
+    "test/dynamo/test_repros.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/variables/torch.py"
+  ],
+  "created_at": "2026-05-25T00:22:32Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

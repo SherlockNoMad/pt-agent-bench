@@ -1,0 +1,27 @@
+diff --git a/torch/_decomp/decompositions.py b/torch/_decomp/decompositions.py
+index 665d1fad51ca6..452ed2b6bb096 100644
+--- a/torch/_decomp/decompositions.py
++++ b/torch/_decomp/decompositions.py
+@@ -4043,7 +4043,7 @@ def one_layer_lstm(inp, hidden, params, has_biases, reverse=False):
+ 
+     out = torch.cat(step_output, 0)
+ 
+-    return out, (hx.squeeze(1), cx.squeeze(1))
++    return out, (hx.squeeze(0), cx.squeeze(0))
+ 
+ 
+ def one_layer_lstm_data(inp, hidden, params, has_biases, batch_sizes, reverse=False):
+diff --git a/torch/export/_patches.py b/torch/export/_patches.py
+index 159bc9b5b9f1e..cd36907b27974 100644
+--- a/torch/export/_patches.py
++++ b/torch/export/_patches.py
+@@ -85,8 +85,7 @@ def body_fn(idx, out, hx, cx):
+     if reverse:
+         out = out.flip(0)
+ 
+-    # Use squeeze(1) to match original implementation
+-    return out, (final_hx.squeeze(1), final_cx.squeeze(1))
++    return out, (final_hx.squeeze(0), final_cx.squeeze(0))
+ 
+ 
+ def lstm_while_loop_impl(

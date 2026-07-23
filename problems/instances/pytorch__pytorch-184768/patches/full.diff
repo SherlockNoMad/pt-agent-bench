@@ -1,0 +1,66 @@
+diff --git a/test/dynamo/test_after_aot.py b/test/dynamo/test_after_aot.py
+index 62cd1a9a60cb0..021e1df495172 100644
+--- a/test/dynamo/test_after_aot.py
++++ b/test/dynamo/test_after_aot.py
+@@ -17,6 +17,7 @@
+     InputReader,
+     InputWriter,
+     repro_minify,
++    repro_run,
+     save_graph_repro,
+ )
+ from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
+@@ -261,6 +262,24 @@ def f(x):
+         r = buf.getvalue()
+         self.assertIn("reader.opaque('__torch__.MyClass')", r)
+ 
++    def test_repro_run_accuracy_does_not_reuse_compiled_graph(self):
++        class Repro(torch.nn.Module):
++            def forward(self, arg0, arg1, arg2):
++                vals = torch.ops.aten._foreach_add.Scalar([arg0, arg1, arg2], 1)
++                torch.ops.aten.copy_.default(arg0, vals[0])
++                torch.ops.aten.copy_.default(arg1, vals[1])
++                torch.ops.aten.copy_.default(arg2, vals[2])
++                return ()
++
++        def load_args(reader):
++            reader.args = [torch.rand((), dtype=torch.float32) for _ in range(3)]
++
++        load_args._version = 0
++        options = SimpleNamespace(
++            accuracy="accuracy", save_dir=None, tracing_mode="real"
++        )
++        repro_run(options, Repro(), load_args)
++
+     @unittest.skipIf(not TEST_CUDA, "requires CUDA")
+     def test_dump_generator(self):
+         gen = torch.cuda.default_generators[0].clone_state()
+diff --git a/torch/_dynamo/repro/after_aot.py b/torch/_dynamo/repro/after_aot.py
+index 184d64a427878..c387ad019b8f5 100644
+--- a/torch/_dynamo/repro/after_aot.py
++++ b/torch/_dynamo/repro/after_aot.py
+@@ -1288,9 +1288,10 @@ def repro_analyze(options: Any, mod: nn.Module, load_args: Any) -> None:
+     # It is certainly faster though!  It probably makes sense to let the
+     # user specify the offload strategy.
+ 
+-    compile_args = _get_compile_args(mod, args)
++    compile_mod = copy.deepcopy(mod)
++    compile_args = _get_compile_args(compile_mod, args)
+     with tqdm(desc="Compiling"):
+-        compiled = compile_fx_inner(mod, compile_args)
++        compiled = compile_fx_inner(compile_mod, compile_args)
+     total = counters["inductor"]["intermediate_hooks"]
+ 
+     known_names = set()
+@@ -1435,8 +1436,9 @@ def repro_run(options: Any, mod: nn.Module, load_args: Any) -> None:
+ 
+     mod, args = repro_common(options, mod, load_args)
+ 
+-    compile_args = _get_compile_args(mod, args)
+-    compiled = compile_fx_inner(mod, compile_args)
++    compile_mod = copy.deepcopy(mod)
++    compile_args = _get_compile_args(compile_mod, args)
++    compiled = compile_fx_inner(compile_mod, compile_args)
+     if isinstance(compiled, str):
+         raise AssertionError("compile_fx_inner should not return a string")
+ 

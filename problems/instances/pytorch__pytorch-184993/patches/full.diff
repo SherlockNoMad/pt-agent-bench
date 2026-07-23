@@ -1,0 +1,223 @@
+diff --git a/test/export/test_sparse.py b/test/export/test_sparse.py
+index addaf097b6f50..14bf47363faa7 100644
+--- a/test/export/test_sparse.py
++++ b/test/export/test_sparse.py
+@@ -6,8 +6,15 @@
+ import unittest
+ 
+ import torch
++from torch._dynamo.source import LocalSource
+ from torch._environment import is_fbcode
+-from torch._subclasses.fake_tensor import FakeTensor
++from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
++from torch.fx.experimental.symbolic_shapes import (
++    DimDynamic,
++    RelaxedUnspecConstraint,
++    ShapeEnv,
++    StatelessSymbolicContext,
++)
+ from torch.testing._internal.common_utils import (
+     instantiate_parametrized_tests,
+     parametrize,
+@@ -216,6 +223,83 @@ def test_todensenet(self, dtype, itype, layout):
+                 else:
+                     self.assertEqual(meta, None)
+ 
++    @parametrize("strict", (False, True))
++    def test_sparse_coo_dynamic_size_to_dense(self, strict):
++        net = ToDenseNet()
++        x = torch.tensor(
++            [
++                [[0.0, 0.0, 1.0], [2.0, 0.0, 1.0]],
++                [[0.0, 0.0, 1.0], [2.0, 0.0, 1.0]],
++            ]
++        ).to_sparse()
++        y = torch.tensor(
++            [
++                [[1.0, 0.0, 1.0], [2.0, 0.0, 1.0]],
++                [[0.0, 0.0, 1.0], [4.0, 1.0, 1.0]],
++                [[0.0, 0.0, 1.0], [2.0, 6.0, 1.0]],
++            ]
++        ).to_sparse()
++
++        prog = torch.export.export(
++            net,
++            (x,),
++            dynamic_shapes={"x": {0: torch.export.Dim.DYNAMIC}},
++            strict=strict,
++        )
++
++        self.assertEqual(prog.module()(y), net(y))
++
++    def test_sparse_coo_fake_to_dense_dtype_error(self):
++        x = torch.tensor([[1.0, 0.0], [0.0, 2.0]]).to_sparse()
++        mode = FakeTensorMode(
++            shape_env=ShapeEnv(tracked_fakes=[]),
++            allow_non_fake_inputs=True,
++            export=True,
++        )
++
++        with mode:
++            fake_x = mode.from_tensor(x)
++            with self.assertRaisesRegex(
++                RuntimeError, "dtype argument is not supported by sparse_to_dense"
++            ):
++                fake_x.to_dense(dtype=torch.float64)
++
++    def test_sparse_coo_fake_symbolic_size_transfer(self):
++        x = torch.tensor([[1.0, 0.0], [0.0, 2.0]]).to_sparse()
++        symbolic_context = StatelessSymbolicContext(
++            dynamic_sizes=[DimDynamic.DYNAMIC, DimDynamic.STATIC],
++            constraint_sizes=[RelaxedUnspecConstraint(warn_only=False), None],
++        )
++        shape_env1 = ShapeEnv(tracked_fakes=[])
++        mode1 = FakeTensorMode(
++            shape_env=shape_env1,
++            allow_non_fake_inputs=True,
++            export=True,
++        )
++        with mode1:
++            fake_x1 = mode1.from_tensor(
++                x,
++                source=LocalSource("x"),
++                symbolic_context=symbolic_context,
++            )
++
++        shape_env2 = ShapeEnv(tracked_fakes=[])
++        mode2 = FakeTensorMode(
++            shape_env=shape_env2,
++            allow_non_fake_inputs=True,
++            export=True,
++        )
++        with mode2:
++            fake_x2 = mode2.from_tensor(
++                fake_x1,
++                source=LocalSource("x"),
++                symbolic_context=symbolic_context,
++            )
++            dense_x2 = fake_x2.to_dense()
++
++        self.assertEqual(dense_x2.layout, torch.strided)
++        self.assertEqual(dense_x2.size(1), 2)
++
+     def test_add(self):
+         net = AddNet()
+         Y = torch.arange(16, 32, dtype=torch.float32).view(4, 4)
+diff --git a/torch/_subclasses/fake_impls.py b/torch/_subclasses/fake_impls.py
+index ead282748b039..fb9acaa239f2d 100644
+--- a/torch/_subclasses/fake_impls.py
++++ b/torch/_subclasses/fake_impls.py
+@@ -523,6 +523,32 @@ def _spdiags(
+     )
+ 
+ 
++@register_op_impl(aten._to_dense.default)
++def _to_dense(
++    fake_mode: FakeTensorMode,
++    func: OpOverload,
++    self: FakeTensor,
++    dtype: torch.dtype | None = None,
++    masked_grad: bool | None = None,
++) -> FakeTensor:
++    if self.layout is torch.sparse_coo:
++        if dtype is not None:
++            raise RuntimeError("dtype argument is not supported by sparse_to_dense")
++        with in_kernel_invocation_manager(fake_mode):
++            out = torch.empty(
++                tuple(self.shape),
++                dtype=self.dtype,
++                device="meta",
++            )
++        return FakeTensor(fake_mode, out, self.fake_device)
++
++    with in_kernel_invocation_manager(fake_mode):
++        out = func(self, dtype=dtype, masked_grad=masked_grad)
++    return fake_mode.fake_tensor_converter.from_meta_and_device(
++        fake_mode, out, self.fake_device
++    )
++
++
+ # index.Tensor data-dependent in only some conditions
+ @register_op_impl(
+     lambda func: torch.Tag.dynamic_output_shape in func.tags
+diff --git a/torch/_subclasses/meta_utils.py b/torch/_subclasses/meta_utils.py
+index 30b0c13fe9a89..b1192528c4ab8 100644
+--- a/torch/_subclasses/meta_utils.py
++++ b/torch/_subclasses/meta_utils.py
+@@ -1145,6 +1145,39 @@ def sym_sizes_strides_storage_offset(
+             else:
+                 return (t.size, t.stride, t.storage_offset)
+ 
++        def sym_sparse_sizes(
++            t: MetaTensorDesc[Any],
++            src: torch._guards.Source,
++            symbolic_context: torch.fx.experimental.symbolic_shapes.SymbolicContext
++            | None = symbolic_context,
++        ) -> tuple[IntLikeType, ...]:
++            if shape_env is None:
++                return t.size
++
++            from torch._prims_common import make_contiguous_strides_for
++            from torch.fx.experimental.symbolic_shapes import is_symbolic
++
++            fake_mode = t.fake_mode
++            has_symbolic = any(is_symbolic(sz) for sz in t.size)
++            if fake_mode is not None and fake_mode.shape_env is shape_env:
++                return t.size
++            if symbolic_context is None and not (
++                fake_mode is not None and has_symbolic
++            ):
++                return t.size
++
++            sparse_tensor_with_synthetic_strides = dataclasses.replace(
++                t,
++                stride=make_contiguous_strides_for(t.size),
++                storage_offset=0,
++            )
++            sizes, _, _ = sym_sizes_strides_storage_offset(
++                sparse_tensor_with_synthetic_strides,
++                src,
++                symbolic_context,
++            )
++            return sizes
++
+         def empty_create(
+             inner_t: MetaTensorDesc[Any],
+             inner_src: torch._guards.Source,
+@@ -1478,17 +1511,34 @@ def tensor_visitor_fn(
+                 if t.is_sparse:
+                     is_leaf = t.is_leaf
+ 
++                    sparse_size = sym_sparse_sizes(t, source, symbolic_context)
++                    if t.sparse_dim is None:
++                        raise AssertionError("t.sparse_dim must not be None")
++                    if t.dense_dim is None:
++                        raise AssertionError("t.dense_dim must not be None")
++
+                     # The lambda function below is similar to
+                     # `t.to(device='meta')` except the latter
+                     # preserves nnz value
+                     r = callback(
+-                        lambda: torch.ops.aten._sparse_coo_tensor_with_dims(
++                        lambda: torch.ops.aten._sparse_coo_tensor_with_dims_and_tensors(
+                             t.sparse_dim,
+                             t.dense_dim,
+-                            t.size,
++                            sparse_size,
++                            torch.empty(
++                                (t.sparse_dim, 0),
++                                dtype=torch.int64,
++                                device="meta",
++                            ),
++                            torch.empty(
++                                (0, *sparse_size[t.sparse_dim :]),
++                                dtype=t.dtype,
++                                device="meta",
++                            ),
+                             dtype=t.dtype,
+                             layout=torch.sparse_coo,
+                             device="meta",
++                            is_coalesced=t.is_coalesced,
+                         )
+                     )
+                     if self.copy_data:

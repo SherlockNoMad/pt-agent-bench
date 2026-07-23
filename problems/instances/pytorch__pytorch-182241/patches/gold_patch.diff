@@ -1,0 +1,35 @@
+diff --git a/torch/_dynamo/polyfills/tensor.py b/torch/_dynamo/polyfills/tensor.py
+index 96a47843737fb..0fcad63620041 100644
+--- a/torch/_dynamo/polyfills/tensor.py
++++ b/torch/_dynamo/polyfills/tensor.py
+@@ -36,6 +36,16 @@ def make_subclass(
+         return data.as_subclass(cls)
+ 
+ 
++@substitute_in_graph(  # type: ignore[arg-type]
++    torch.Tensor.__new__
++)
++def tensor_pynew(
++    cls: type[Any], data: torch.Tensor, requires_grad: bool = False, **kwargs: Any
++) -> Any:
++    return make_subclass(cls, data, requires_grad, **kwargs)
++
++
+ __all__ = [
+     "make_subclass",
++    "tensor_pynew",
+ ]
+diff --git a/torch/_dynamo/variables/misc.py b/torch/_dynamo/variables/misc.py
+index d3ab60809a2e9..e4d3838b1b665 100644
+--- a/torch/_dynamo/variables/misc.py
++++ b/torch/_dynamo/variables/misc.py
+@@ -407,6 +407,9 @@ def call_method(
+             # e.g., tensor ops like `torch.Tensor.to`.
+             fn_var = VariableTracker.build(tx, inner_fn, source, realize=True)
+             return fn_var.call_function(tx, [self.objvar] + args, kwargs)
++        elif isinstance(inner_fn, types.BuiltinFunctionType):
++            fn_vt = VariableTracker.build(tx, inner_fn, source=source, realize=True)
++            return fn_vt.call_function(tx, args, kwargs)
+ 
+         unimplemented(
+             gb_type="Attempted to call a super() attribute that is "

@@ -1,0 +1,18 @@
+# Regeneratable runtime — never commit (see setup_workspace.sh)
+/workspace/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Per-run scratch
+/results/report_*.json
+*.log
+
+# OS
+.DS_Store
+
+# solver transcripts may contain local paths — not published
+/results/traces/

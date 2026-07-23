@@ -1,0 +1,49 @@
+{
+  "instance_id": "pytorch__pytorch-184146",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "146644"
+  ],
+  "pull_number": 184146,
+  "base_commit": "17d734d460dfaf83a98b6874b8d7fe7cc9196c99",
+  "problem_statement": "Scalar tensor fails to broadcast with shape of in-graph constructed NJT\n\nRepro:\n```python\nimport torch\n\n@torch.compile\ndef f(values, offsets):\n    nt = torch.nested.nested_tensor_from_jagged(values, offsets)\n    return torch.where(nt > 0.0, torch.ones_like(nt), 0)\n\nvalues = torch.randn(10, 5, device=\"cuda\")\noffsets = torch.tensor([0, 2, 5, 7, 10], device=\"cuda\")\noutput = f(values, offsets)\n```\n\nError:\n```\ntorch._inductor.exc.InductorError: LoweringException: NotImplementedError: inductor does not support layout=torch.jagged\n  target: aten.scalar_tensor.default\n  args[0]: 0\n  kwargs: {'dtype': torch.float32, 'layout': torch.jagged, 'device': device(type='cuda', index=0)}\n```\n\nThis comes from trying to broadcast the `0` value with the NJT shape. The fix in #141500 does not work for an in-graph constructed NJT.\n\ncc @cpuhrsch @bhosmer @drisspg @soulitzer @davidberard98 @YuqingJ @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @ipiszy @kadeng @muchulee8 @amjames @aakhundov @coconutruben @jataylo @yf225 @chenyang78 @desertfire",
+  "patch": "diff --git a/torch/_inductor/lowering.py b/torch/_inductor/lowering.py\nindex 23c47e65496a7..bc047aa35ac64 100644\n--- a/torch/_inductor/lowering.py\n+++ b/torch/_inductor/lowering.py\n@@ -3843,6 +3843,9 @@ def _unwrap(x):\n \n @register_lowering([torch.tensor, aten.scalar_tensor, prims.scalar_tensor])\n def tensor(data, *, dtype=None, device=None, layout=None, pin_memory=False):\n+    # Match eager/meta scalar_tensor behavior; NJT handles scalar broadcasting.\n+    if layout == torch.jagged:\n+        layout = torch.strided\n     assert_nyi(layout in (None, torch.strided), f\"layout={layout}\")\n     assert_nyi(not pin_memory, \"pin_memory\")\n     if isinstance(_unwrap(data), int):\n",
+  "test_patch": "diff --git a/test/test_nestedtensor.py b/test/test_nestedtensor.py\nindex 28c41840dcd7d..1d98d283a7638 100644\n--- a/test/test_nestedtensor.py\n+++ b/test/test_nestedtensor.py\n@@ -8375,6 +8375,39 @@ def f(values, offsets):\n         for nt_component, output_component in zip(nt.unbind(), output.unbind()):\n             self.assertEqual(nt_component.shape, output_component.shape)\n \n+    @skipIfTorchDynamo(\"compiles internally\")\n+    @skipCUDAIf(not SM70OrLater, \"GPU capability is < SM70\")\n+    @dtypes(torch.float32)\n+    @parametrize(\"scalar_input\", [\"self\", \"other\"])\n+    def test_where_scalar_broadcast_on_in_graph_constructed_njt(\n+        self, device, dtype, scalar_input\n+    ):\n+        nt = torch.nested.nested_tensor(\n+            [\n+                torch.randn(2, 5),\n+                torch.randn(3, 5),\n+                torch.randn(2, 5),\n+                torch.randn(3, 5),\n+            ],\n+            layout=torch.jagged,\n+            device=device,\n+            dtype=dtype,\n+        )\n+\n+        values = nt._values.detach().clone()\n+        offsets = nt._offsets.detach().clone()\n+\n+        def f(values, offsets):\n+            nt = torch.nested.nested_tensor_from_jagged(values, offsets)\n+            condition = nt > 0.0\n+            if scalar_input == \"self\":\n+                return torch.where(condition, 1, torch.zeros_like(nt))\n+            return torch.where(condition, torch.ones_like(nt), 0)\n+\n+        expected = f(values, offsets)\n+        output = torch.compile(f, fullgraph=True)(values, offsets)\n+        self.assertEqual(output, expected)\n+\n \n # The following lists specify skips and xfails for particular SampleInputs. Note that\n # these are attempted to be matched from top to bottom and only one at most will\n",
+  "FAIL_TO_PASS": [
+    "test/test_nestedtensor.py::TestNestedTensorSubclassCPU::test_where_scalar_broadcast_on_in_graph_constructed_njt_scalar_input_other_cpu_float32",
+    "test/test_nestedtensor.py::TestNestedTensorSubclassCPU::test_where_scalar_broadcast_on_in_graph_constructed_njt_scalar_input_self_cpu_float32"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_2_max_seq_len_3_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_2_max_seq_len_3_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_2_max_seq_len_5_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_2_max_seq_len_5_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_4_max_seq_len_3_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_4_max_seq_len_3_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_4_max_seq_len_5_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_2d_nested_tensor_batch_size_4_max_seq_len_5_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_2_max_seq_len_3_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_2_max_seq_len_3_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_2_max_seq_len_5_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_2_max_seq_len_5_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_4_max_seq_len_3_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_4_max_seq_len_3_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_4_max_seq_len_5_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_batch_size_4_max_seq_len_5_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_float_batch_size_2_max_seq_len_3_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_float_batch_size_2_max_seq_len_3_vocab_size_20",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_float_batch_size_2_max_seq_len_5_vocab_size_10",
+    "test/test_nestedtensor.py::TestNestedTensor::test_3d_nested_tensor_float_batch_size_2_max_seq_len_5_vocab_size_20"
+  ],
+  "test_files": [
+    "test/test_nestedtensor.py"
+  ],
+  "fix_files": [
+    "torch/_inductor/lowering.py"
+  ],
+  "created_at": "2026-05-27T00:08:47Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

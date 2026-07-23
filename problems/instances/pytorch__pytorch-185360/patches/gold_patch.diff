@@ -1,0 +1,13 @@
+diff --git a/torch/_meta_registrations.py b/torch/_meta_registrations.py
+index 600ca23fab904..cd747a212ecef 100644
+--- a/torch/_meta_registrations.py
++++ b/torch/_meta_registrations.py
+@@ -4723,7 +4723,7 @@ def meta_lshifts(self, other):
+ 
+ @register_meta(aten.zero.default)
+ def meta_zero(self):
+-    return self.new_empty(self.shape)
++    return torch.empty_like(self)
+ 
+ 
+ @register_meta([aten.fill_.Tensor, aten.fill_.Scalar])

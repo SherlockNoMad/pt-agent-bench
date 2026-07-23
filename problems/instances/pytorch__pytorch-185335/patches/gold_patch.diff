@@ -1,0 +1,13 @@
+diff --git a/torch/_decomp/decompositions.py b/torch/_decomp/decompositions.py
+index 24c46c452e663..e27a3961752d3 100644
+--- a/torch/_decomp/decompositions.py
++++ b/torch/_decomp/decompositions.py
+@@ -1272,7 +1272,7 @@ def dropout(input: Tensor, p: float, train: bool | None):
+     if train and p != 0:
+         return aten.native_dropout(input, p, train)[0]
+     else:
+-        return input.clone()
++        return input
+ 
+ 
+ @register_decomposition(aten.native_dropout)

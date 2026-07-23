@@ -1,0 +1,46 @@
+diff --git a/test/dynamo/test_backends.py b/test/dynamo/test_backends.py
+index 9754a3d9a9492..f6a7cdd6cf726 100644
+--- a/test/dynamo/test_backends.py
++++ b/test/dynamo/test_backends.py
+@@ -1,4 +1,5 @@
+ # Owner(s): ["module: dynamo"]
++import sys
+ import unittest
+ from unittest.mock import MagicMock, patch
+ 
+@@ -163,6 +164,16 @@ def test_tvm(self, device):
+         self._check_backend_works("tvm", device, options={"scheduler": None})
+         self._check_backend_works("tvm", device, options={"opt_level": 0})
+ 
++    def test_tvm_scheduler_backends(self, device):
++        from torch._dynamo.backends.tvm import tvm_auto_scheduler, tvm_meta_schedule
++
++        gm = torch.fx.symbolic_trace(lambda x: x + 1)
++        for backend in (tvm_meta_schedule, tvm_auto_scheduler):
++            # blocking the tvm import keeps this fast and deterministic;
++            # reaching ImportError proves the partial's kwargs are valid
++            with patch.dict(sys.modules, {"tvm": None}):
++                self.assertRaises(ImportError, backend, gm, [torch.randn(2)])
++
+     @onlyHPU
+     def test_intel_gaudi_backend(self, device):
+         self._check_backend_works("hpu_backend", device)
+diff --git a/torch/_dynamo/backends/tvm.py b/torch/_dynamo/backends/tvm.py
+index c25a5a5f286e7..5baec92302112 100644
+--- a/torch/_dynamo/backends/tvm.py
++++ b/torch/_dynamo/backends/tvm.py
+@@ -182,8 +182,12 @@ def exec_tvm(*i_args: torch.Tensor) -> list[torch.Tensor]:
+     return exec_tvm
+ 
+ 
+-tvm_meta_schedule = functools.partial(tvm, scheduler="meta_schedule")
+-tvm_auto_scheduler = functools.partial(tvm, scheduler="auto_scheduler")
++tvm_meta_schedule = functools.partial(
++    tvm, options=MappingProxyType({"scheduler": "meta_schedule"})
++)
++tvm_auto_scheduler = functools.partial(
++    tvm, options=MappingProxyType({"scheduler": "auto_scheduler"})
++)
+ 
+ 
+ def has_tvm() -> bool:

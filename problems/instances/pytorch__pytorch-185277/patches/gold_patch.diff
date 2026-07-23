@@ -1,0 +1,35 @@
+diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py
+index db6190298be4c..cf6c958a5fd23 100644
+--- a/torch/_dynamo/trace_rules.py
++++ b/torch/_dynamo/trace_rules.py
+@@ -187,6 +187,8 @@
+     "torch._utils._maybe_view_chunk_cat": UserFunctionVariable,
+     "torch.fx._symbolic_trace.is_fx_tracing": TorchInGraphFunctionVariable,
+     "torch.fx._symbolic_trace.is_fx_symbolic_tracing": TorchInGraphFunctionVariable,
++    "torch.mps.is_available": TorchInGraphFunctionVariable,
++    "torch.mtia.is_available": TorchInGraphFunctionVariable,
+     "torch._dynamo.external_utils.is_compiling": TorchInGraphFunctionVariable,
+     "torch._dynamo.utils._disable_side_effect_safety_checks_for_current_subtracer": UserFunctionVariable,
+     "torch.compiler.is_compiling": TorchInGraphFunctionVariable,
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index a62851e7aba07..0e79d3a8e5cca 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -190,6 +190,8 @@
+     torch._C._get_cublas_allow_tf32,
+     torch._C._is_any_autocast_enabled,
+     torch.accelerator.is_available,
++    torch.backends.mps.is_available.__wrapped__,  # type: ignore[attr-defined]
++    torch.backends.mps.is_built,
+     torch.cuda.get_device_properties,
+     torch.cuda.is_available,
+     torch.distributed.is_available,
+@@ -205,6 +207,8 @@
+     torch.promote_types,
+     torch._C._get_privateuse1_backend_name,
+     torch.autograd._is_checkpoint_valid,
++    torch.mps.is_available,
++    torch.mtia.is_available,
+     torch.xpu.get_device_properties,
+     torch.xpu.is_available,
+ ] + constant_fold_functions_need_guards

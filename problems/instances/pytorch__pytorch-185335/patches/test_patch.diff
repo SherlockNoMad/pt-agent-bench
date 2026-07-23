@@ -1,0 +1,66 @@
+diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py
+index 2ff7d23092183..bde7db7ac2497 100644
+--- a/test/dynamo/test_repros.py
++++ b/test/dynamo/test_repros.py
+@@ -2385,6 +2385,24 @@ def fn(x):
+         res = fn(y)
+         self.assertTrue(same(ref, res))
+ 
++    def test_dropout_eval_setattr_parameter(self):
++        class Mod(torch.nn.Module):
++            def __init__(self) -> None:
++                super().__init__()
++                self.weight = torch.nn.Parameter(torch.randn(5, 5))
++
++            def forward(self, x):
++                w = torch.nn.functional.dropout(self.weight, training=False)
++                self.foo = w
++                return x + self.weight
++
++        mod = Mod()
++        x = torch.randn(5, 5)
++        mod(x)
++        mod.compile(backend="eager", fullgraph=True)
++        self.assertTrue(same(mod(x), x + mod.weight))
++        self.assertIs(mod.foo, mod.weight)
++
+     def test_setitem_boolean_mask_diff(self):
+         def fn(x, b, y):
+             x = x.clone()
+diff --git a/test/functorch/test_aotdispatch.py b/test/functorch/test_aotdispatch.py
+index 85c0203c783a8..f939043290686 100644
+--- a/test/functorch/test_aotdispatch.py
++++ b/test/functorch/test_aotdispatch.py
+@@ -5126,14 +5126,16 @@ def fn(p, x):
+         ):
+             aot_export_module(mod, [inp], trace_joint=False, pre_dispatch=True)
+ 
+-        gm, _ = aot_export_module(mod, [inp], trace_joint=False, pre_dispatch=False)
++        gm, graph_sig = aot_export_module(
++            mod, [inp], trace_joint=False, pre_dispatch=False
++        )
++        self.assertEqual(graph_sig.user_inputs_to_mutate, {"add": "arg1_1"})
+         self.assertExpectedInline(
+             str(gm.code).strip(),
+             """\
+ def forward(self, arg0_1, arg1_1):
+-    clone = torch.ops.aten.clone.default(arg1_1);  arg1_1 = None
+-    add = torch.ops.aten.add.Tensor(clone, 1);  clone = None
+-    return (add,)""",
++    add = torch.ops.aten.add.Tensor(arg1_1, 1);  arg1_1 = None
++    return (add, add)""",
+         )
+ 
+         fw_graph_cell = [None]
+@@ -5153,9 +5155,8 @@ def forward(self, arg0_1, arg1_1):
+             str(fw_graph.code).strip(),
+             """\
+ def forward(self, arg0_1, arg1_1):
+-    clone = torch.ops.aten.clone.default(arg1_1);  arg1_1 = None
+-    add = torch.ops.aten.add.Tensor(clone, 1);  clone = None
+-    return (add,)""",
++    add = torch.ops.aten.add.Tensor(arg1_1, 1);  arg1_1 = None
++    return (add, add)""",
+         )
+ 
+     def test_aot_export_predispatch_func_simple(self):

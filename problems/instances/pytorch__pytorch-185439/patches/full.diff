@@ -1,0 +1,167 @@
+diff --git a/test/test_hop_infra.py b/test/test_hop_infra.py
+index 58f1a3819a592..5acf229ac48f6 100644
+--- a/test/test_hop_infra.py
++++ b/test/test_hop_infra.py
+@@ -102,6 +102,55 @@ def test_hop_deepcopy_preserves_identity(self):
+             )
+             self.assertEqual(id(hop), id(copied_hop))
+ 
++    def test_triton_kernel_wrapper_functional_fake_tensor_nested_kwargs(self):
++        from torch._higher_order_ops.triton_kernel_wrap import (
++            triton_kernel_wrapper_functional,
++        )
++        from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
++
++        mode = FakeTensorMode()
++        with mode:
++            fake_output = torch.empty_strided((2, 3), (3, 1))
++
++        self.assertIsInstance(fake_output, FakeTensor)
++
++        out = triton_kernel_wrapper_functional(
++            kernel_idx=0,
++            constant_args_idx=0,
++            grid=[(1,)],
++            tma_descriptor_metadata={},
++            kwargs={"out_ptr": fake_output},
++            tensors_to_clone=["out_ptr"],
++        )
++
++        self.assertEqual(set(out.keys()), {"out_ptr"})
++        self.assertIsInstance(out["out_ptr"], FakeTensor)
++        self.assertIs(out["out_ptr"].fake_mode, mode)
++        self.assertEqual(out["out_ptr"].size(), fake_output.size())
++        self.assertEqual(out["out_ptr"].stride(), fake_output.stride())
++
++    def test_triton_kernel_wrapper_mutation_fake_tensor_nested_kwargs(self):
++        from torch._higher_order_ops.triton_kernel_wrap import (
++            triton_kernel_wrapper_mutation,
++        )
++        from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
++
++        mode = FakeTensorMode()
++        with mode:
++            fake_output = torch.empty_strided((2, 3), (3, 1))
++
++        self.assertIsInstance(fake_output, FakeTensor)
++
++        out = triton_kernel_wrapper_mutation(
++            kernel_idx=0,
++            constant_args_idx=0,
++            grid=[(1,)],
++            tma_descriptor_metadata={},
++            kwargs={"out_ptr": fake_output},
++        )
++
++        self.assertIsNone(out)
++
+ 
+ if __name__ == "__main__":
+     run_tests()
+diff --git a/torch/_higher_order_ops/triton_kernel_wrap.py b/torch/_higher_order_ops/triton_kernel_wrap.py
+index 7a6d43fda1f0d..f6046cc196b58 100644
+--- a/torch/_higher_order_ops/triton_kernel_wrap.py
++++ b/torch/_higher_order_ops/triton_kernel_wrap.py
+@@ -19,7 +19,7 @@
+ import torch.fx as fx
+ import torch.utils._pytree as pytree
+ from torch import SymInt, Tensor
+-from torch._C import DispatchKey
++from torch._C import _dispatch_keys, DispatchKey
+ from torch._higher_order_ops.utils import redirect_to_mode
+ from torch._ops import HigherOrderOperator
+ from torch._prims_common import clone_preserve_strides
+@@ -1246,8 +1246,23 @@ def _extract_arg(node, arg_name, positional_index):
+ # Triton Kernel Wrappers
+ 
+ 
++class _TritonKernelWrapper(HigherOrderOperator):
++    def _get_overloaded_args(
++        self, args: tuple[Any, ...], kwargs: dict[str, Any]
++    ) -> tuple[Tensor, ...]:
++        overloaded_args = list(super()._get_overloaded_args(args, kwargs))
++        triton_kwargs = kwargs.get("kwargs")
++        if isinstance(triton_kwargs, dict):
++            overloaded_args.extend(
++                arg
++                for arg in triton_kwargs.values()
++                if isinstance(arg, Tensor) and _dispatch_keys(arg).has("Python")
++            )
++        return tuple(overloaded_args)
++
++
+ # Used for wrapping a Triton Kernel
+-class TritonKernelWrapperMutation(HigherOrderOperator):
++class TritonKernelWrapperMutation(_TritonKernelWrapper):
+     def __init__(self) -> None:
+         super().__init__("triton_kernel_wrapper_mutation", cacheable=True)
+ 
+@@ -1273,7 +1288,7 @@ def __call__(
+ 
+ 
+ # Used for wrapping a Triton Kernel in a functional manner
+-class TritonKernelWrapperFunctional(HigherOrderOperator):
++class TritonKernelWrapperFunctional(_TritonKernelWrapper):
+     def __init__(self) -> None:
+         super().__init__("triton_kernel_wrapper_functional", cacheable=True)
+ 
+diff --git a/torch/_ops.py b/torch/_ops.py
+index 0f468eea8ddc6..f8c5e73a20421 100644
+--- a/torch/_ops.py
++++ b/torch/_ops.py
+@@ -399,6 +399,28 @@ def cacheable(self) -> bool:
+     def fallthrough(self, dispatch_key):
+         self.non_fallthrough_keys = self.non_fallthrough_keys.remove(dispatch_key)
+ 
++    def _get_overloaded_args(
++        self, args: tuple[Any, ...], kwargs: dict[str, Any]
++    ) -> tuple[torch.Tensor, ...]:
++        # Default HOP behavior matches handle_torch_function_no_python_arg_parser
++        # in torch/csrc/utils/python_arg_parser.cpp.
++        overloaded_args: list[torch.Tensor] = []
++
++        def has_python_key(tensor):
++            return torch._C._dispatch_keys(tensor).has("Python")
++
++        def check_overloaded(arg):
++            if isinstance(arg, torch.Tensor) and has_python_key(arg):
++                overloaded_args.append(arg)
++
++        for arg in (*args, *kwargs.values()):
++            check_overloaded(arg)
++            if isinstance(arg, (list, tuple)):
++                for a in arg:
++                    check_overloaded(a)
++
++        return tuple(overloaded_args)
++
+     # Use positional-only argument to avoid naming collide with custom ops arguments
+     # that are named "self".
+     def dispatch(self, /, dispatch_key, *args, **kwargs):
+@@ -414,25 +436,7 @@ def dispatch(self, /, dispatch_key, *args, **kwargs):
+             return dispatch_functorch(self, args, kwargs)
+ 
+         if dispatch_key == DispatchKey.Python:
+-            # Keep the following 1:1 with handle_torch_function_no_python_arg_parser
+-            # in torch/csrc/utils/python_arg_parser.cpp
+-
+-            overloaded_args_list = []
+-
+-            def has_python_key(tensor):
+-                return torch._C._dispatch_keys(tensor).has("Python")
+-
+-            def check_overloaded(arg):
+-                if isinstance(arg, torch.Tensor) and has_python_key(arg):
+-                    overloaded_args_list.append(arg)
+-
+-            for arg in (*args, *kwargs.values()):
+-                check_overloaded(arg)
+-                if isinstance(arg, (list, tuple)):
+-                    for a in arg:
+-                        check_overloaded(a)
+-
+-            overloaded_args = tuple(overloaded_args_list)
++            overloaded_args = self._get_overloaded_args(args, kwargs)
+ 
+             # Step 1: dispatch on any user TorchDispatchModes
+             from torch.utils._python_dispatch import _pop_mode_temporarily

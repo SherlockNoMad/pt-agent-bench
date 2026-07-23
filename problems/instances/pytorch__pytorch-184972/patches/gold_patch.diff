@@ -1,0 +1,16 @@
+diff --git a/torch/_dynamo/variables/tensor.py b/torch/_dynamo/variables/tensor.py
+index 80234a56f8fba..90d7ea5313341 100644
+--- a/torch/_dynamo/variables/tensor.py
++++ b/torch/_dynamo/variables/tensor.py
+@@ -577,6 +577,11 @@ def method_attr_grad(
+     ) -> VariableTracker | None:
+         if tx.output.side_effects.has_pending_mutation_of_attr(self, "grad"):
+             return tx.output.side_effects.load_attr(self, "grad")
++        if (
++            isinstance(self.mutation_type, AttributeMutationNew)
++            and not self.has_grad_fn
++        ):
++            return ConstantVariable.create(None)
+         # None tells var_getattr to use default .grad handling
+         return None
+ 

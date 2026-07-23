@@ -1,0 +1,13 @@
+diff --git a/torch/_dynamo/debug_utils.py b/torch/_dynamo/debug_utils.py
+index b304176700b22..863074c1d3316 100644
+--- a/torch/_dynamo/debug_utils.py
++++ b/torch/_dynamo/debug_utils.py
+@@ -468,7 +468,7 @@ def _cuda_system_info_comment() -> str:
+             model_str += f"{comment}\n"
+         else:
+             model_str += "# Not searching for nvcc on ROCM setup\n"
+-    except (FileNotFoundError, subprocess.CalledProcessError):
++    except (OSError, subprocess.CalledProcessError):
+         model_str += "# nvcc not found\n"
+ 
+     gpu_names = Counter(

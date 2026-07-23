@@ -1,0 +1,166 @@
+diff --git a/test/dynamo/test_package.py b/test/dynamo/test_package.py
+index 2649d3924fb2f..ed059f8e91b7e 100644
+--- a/test/dynamo/test_package.py
++++ b/test/dynamo/test_package.py
+@@ -33,6 +33,10 @@ def compute_loss_helper(x):
+     return reduce_to_scalar_loss(x)
+ 
+ 
++def compiled_region_with_backend_id_for_package_test():
++    return __compiled_fn_0_00000000_0000_0000_0000_000000000000()  # noqa: F821
++
++
+ @functorch_config.patch("bundled_autograd_cache", True)
+ @torch._dynamo.config.patch({"strict_precompile": True})
+ @instantiate_parametrized_tests
+@@ -64,6 +68,22 @@ def _save_and_reload(self, expected_backends, expected_dynamo):
+         torch._dynamo.reset()
+         PrecompileContext.clear()
+ 
++    def test_guarded_code_records_backend_ids_from_bytecode(self):
++        def fn(x):
++            return x + 1
++
++        (backend_id,) = (
++            compiled_region_with_backend_id_for_package_test.__code__.co_names
++        )
++        package = CompilePackage(fn)
++        with package.code_context(fn.__code__):
++            package.add_guarded_code(
++                b"", compiled_region_with_backend_id_for_package_test.__code__
++            )
++
++        cache_entry = package.cache_entry()
++        self.assertEqual(cache_entry.codes[0].backend_ids, [backend_id])
++
+     @unittest.expectedFailure  # FUNCTION_MATCH guard not serializable today
+     def test_nn_module(self):
+         class MyModule(torch.nn.Module):
+diff --git a/torch/_dynamo/bytecode_transformation.py b/torch/_dynamo/bytecode_transformation.py
+index 37e44a4295070..2d76849c4db6f 100644
+--- a/torch/_dynamo/bytecode_transformation.py
++++ b/torch/_dynamo/bytecode_transformation.py
+@@ -18,6 +18,7 @@
+ import dis
+ import functools
+ import itertools
++import re
+ import sys
+ import types
+ import uuid
+@@ -1961,6 +1962,21 @@ def unique_id(name: str, with_uuid: bool = False) -> str:
+     return ret
+ 
+ 
++COMPILED_FN_PREFIX = "__compiled_fn"
++_COMPILED_FN_NAME_RE = re.compile(
++    rf"^{COMPILED_FN_PREFIX}_\d+_"
++    r"[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}$"
++)
++
++
++def make_compiled_fn_name() -> str:
++    return unique_id(COMPILED_FN_PREFIX, with_uuid=True)
++
++
++def is_compiled_fn_name(name: str) -> bool:
++    return _COMPILED_FN_NAME_RE.fullmatch(name) is not None
++
++
+ def is_generator(code: types.CodeType) -> bool:
+     co_generator = 0x20
+     return (code.co_flags & co_generator) > 0
+diff --git a/torch/_dynamo/output_graph.py b/torch/_dynamo/output_graph.py
+index 919966c84df16..1700e395606fc 100644
+--- a/torch/_dynamo/output_graph.py
++++ b/torch/_dynamo/output_graph.py
+@@ -101,6 +101,7 @@
+     create_rot_n,
+     create_swap,
+     Instruction,
++    make_compiled_fn_name,
+     unique_id,
+ )
+ from .code_context import code_context
+@@ -2824,7 +2825,7 @@ def compile_and_call_fx_graph(
+             if count_calls(self.graph) == 0 and len(rv) == 0:
+                 return [], None
+ 
+-            name = unique_id("__compiled_fn", with_uuid=True)
++            name = make_compiled_fn_name()
+ 
+             if not isinstance(rv, list):
+                 raise AssertionError(f"rv must be a list, got {type(rv)}")
+diff --git a/torch/_dynamo/package.py b/torch/_dynamo/package.py
+index f25366fbeabee..8755c66e6f224 100644
+--- a/torch/_dynamo/package.py
++++ b/torch/_dynamo/package.py
+@@ -35,7 +35,11 @@
+ from torch._dynamo.graph_utils import _graph_device_type
+ from torch.utils.weak import WeakIdKeyDictionary
+ 
+-from .bytecode_transformation import get_code_keys
++from .bytecode_transformation import (
++    COMPILED_FN_PREFIX,
++    get_code_keys,
++    is_compiled_fn_name,
++)
+ from .utils import counters, dynamo_timed, increment_frame
+ 
+ 
+@@ -150,6 +154,15 @@ def load_guard_manager(
+ _FunctionId = NewType("_FunctionId", str)  # __resume_at
+ 
+ 
++def _backend_ids_from_code(code: types.CodeType) -> Iterator[_BackendId]:
++    for name in code.co_names:
++        if is_compiled_fn_name(name):
++            yield _BackendId(name)
++    for const in code.co_consts:
++        if isinstance(const, types.CodeType):
++            yield from _backend_ids_from_code(const)
++
++
+ @dataclasses.dataclass(frozen=True)
+ class InlinedSource:
+     module: str
+@@ -770,6 +783,8 @@ def add_guarded_code(
+             dynamo_code=SerializedCode.from_code_object(dynamo_code),
+         )
+         self._current_entry.guarded_codes.append(guarded_code_entry)
++        for backend_id in _backend_ids_from_code(dynamo_code):
++            self._add_backend_id(backend_id)
+ 
+     def add_inlined_source(self, sources: list[types.CodeType]) -> None:
+         if self._current_entry is None:
+@@ -808,18 +823,23 @@ def add_import_source(self, alias: str, module_name: str) -> None:
+             raise AssertionError("_current_entry is not set in add_import_source")
+         self._current_entry.import_sources[alias] = module_name
+ 
+-    def add_backend_id(self, backend_id: str, backend: Any | None = None) -> None:
++    def _add_backend_id(
++        self, backend_id: _BackendId, backend: Any | None = None
++    ) -> None:
+         if self._current_entry is None:
+             raise AssertionError("_current_entry is not set in add_backend_id")
+-        if not backend_id.startswith("__compiled_fn_"):
+-            raise AssertionError(
+-                f"backend_id must start with '__compiled_fn_', got '{backend_id}'"
+-            )
+-        backend_id = _BackendId(backend_id)
+-        self._current_entry.backend_ids.append(backend_id)
++        if backend_id not in self._current_entry.backend_ids:
++            self._current_entry.backend_ids.append(backend_id)
+         if backend is not None:
+             self._cached_backends[backend_id] = backend
+ 
++    def add_backend_id(self, backend_id: str, backend: Any | None = None) -> None:
++        if not backend_id.startswith(f"{COMPILED_FN_PREFIX}_"):
++            raise AssertionError(
++                f"backend_id must start with '{COMPILED_FN_PREFIX}_', got '{backend_id}'"
++            )
++        self._add_backend_id(_BackendId(backend_id), backend)
++
+     def validate(self) -> None:
+         if self._current_entry is not None:
+             raise AssertionError("_current_entry should be None during validate")

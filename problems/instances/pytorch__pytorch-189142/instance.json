@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-189142",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "189106"
+  ],
+  "pull_number": 189142,
+  "base_commit": "4e0e2c53fd5d1b9b9d169b8f0b48e6cde3bfa863",
+  "problem_statement": "`get_signature_for_torch_op` reports incorrect `return_annotation` for `tuple`s\n\n### \ud83d\udc1b Describe the bug\n\nThe following snippet reproduces the issue (`var_mean.return_annotation` should be `typing.Tuple[torch.Tensor, torch.Tensor]`):\n\n```python\nimport torch\n\n[where_sig] = torch.fx.operator_schemas.get_signature_for_torch_op(torch.ops.aten.where.default)\n[var_mean_sig] = torch.fx.operator_schemas.get_signature_for_torch_op(torch.ops.aten.var_mean.default)\nprint(where_sig.return_annotation)     # typing.List[torch.Tensor]\nprint(var_mean_sig.return_annotation)  # (<class 'torch.Tensor'>, <class 'torch.Tensor'>)\n```\n\n### Versions\n\n```\nPyTorch version: 2.14.0.dev20260706\nIs debug build: False\nCUDA used to build PyTorch: None\nROCM used to build PyTorch: N/A\n\nOS: macOS 26.5.1 (arm64)\nGCC version: Could not collect\nClang version: 21.0.0 (clang-2100.1.1.101)\nCMake version: version 4.2.3\nLibc version: N/A\n\nPython version: 3.14.2 (v3.14.2:df793163d58, Dec  5 2025, 12:18:06) [Clang 16.0.0 (clang-1600.0.26.6)] (64-bit runtime)\nPython platform: macOS-26.5.1-arm64-arm-64bit-Mach-O\nIs CUDA available: False\nCUDA runtime version: No CUDA\nCUDA_MODULE_LOADING set to: N/A\nGPU models and configuration: No CUDA\nNvidia driver version: No CUDA\ncuDNN version: No CUDA\nIs XPU available: False\nHIP runtime version: N/A\nMIOpen runtime version: N/A\nIs XNNPACK available: False\nCaching allocator config: N/A\n\nCPU:\nApple M4 Pro\n\nVersions of relevant libraries:\n[pip3] Could not collect\n[conda] Could not collect\n```\n\ncc @ezyang @EikanWang @jgong5 @wenzhe-nrv",
+  "patch": "diff --git a/torch/fx/operator_schemas.py b/torch/fx/operator_schemas.py\nindex 66daf01f4734b..b6257d26bd2e3 100644\n--- a/torch/fx/operator_schemas.py\n+++ b/torch/fx/operator_schemas.py\n@@ -147,7 +147,7 @@ def _torchscript_schema_to_signature_impl(\n     elif len(return_types) == 1:\n         return_type = return_types[0]\n     else:\n-        return_type = tuple(return_types)\n+        return_type = tuple.__class_getitem__(tuple(return_types))\n \n     return inspect.Signature(parameters, return_annotation=return_type)\n \n",
+  "test_patch": "diff --git a/test/test_fx.py b/test/test_fx.py\nindex 475842ad8bf97..d455d10b5a5b2 100644\n--- a/test/test_fx.py\n+++ b/test/test_fx.py\n@@ -386,6 +386,40 @@ def test_custom_import(self):\n         x, y = torch.rand(1), torch.rand(1)\n         self.assertEqual(torch.sin(x + y), gm(x, y))\n \n+    def test_tuple_return_annotation_for_schemas(self):\n+\n+        # Target an op that returns multiple tensors (e.g., var_mean)\n+        op = torch.ops.aten.var_mean.default\n+\n+        # get_signature_for_torch_op returns a list of signatures\n+        sigs = get_signature_for_torch_op(op)\n+        self.assertTrue(len(sigs) > 0, \"Expected at least one signature\")\n+\n+        # Grab the first signature schema\n+        sig = sigs[0]\n+        ret_ann = sig.return_annotation\n+\n+        # 1. Ensure it's not a raw Python tuple (The bug you fixed)\n+        self.assertNotEqual(\n+            type(ret_ann), tuple,\n+            \"return_annotation should be a generic type hint, not a raw tuple of types\"\n+        )\n+\n+        # 2. Ensure it resolves to a proper tuple typing origin (tuple or typing.Tuple)\n+        origin = getattr(ret_ann, \"__origin__\", None)\n+        self.assertIn(\n+            origin, (tuple, tuple),\n+            f\"Expected tuple or typing.Tuple origin, got {origin}\"\n+        )\n+\n+        # 3. Ensure the inner arguments are properly set to torch.Tensor\n+        args = getattr(ret_ann, \"__args__\", None)\n+        self.assertIsNotNone(args, \"Tuple annotation must have __args__\")\n+        self.assertTrue(\n+            all(issubclass(a, torch.Tensor) for a in args),\n+            \"Inner tuple arguments should be subclass of torch.Tensor\"\n+        )\n+\n     def test_boxed_arg_indices_codegen(self):\n         def multi_boxed_call(left, passthrough, right):\n             return left[0] + left[1] + passthrough + right[0]\n",
+  "FAIL_TO_PASS": [
+    "test/test_fx.py::TestFX::test_tuple_return_annotation_for_schemas"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_fx.py::TestCSEPass::test_banned_list",
+    "test/test_fx.py::TestCSEPass::test_empty",
+    "test/test_fx.py::TestCSEPass::test_immutable_list_multiple_entries",
+    "test/test_fx.py::TestCSEPass::test_immutable_list_type",
+    "test/test_fx.py::TestCSEPass::test_kwarg",
+    "test/test_fx.py::TestCSEPass::test_nested_immutable_list_type",
+    "test/test_fx.py::TestCSEPass::test_nochange",
+    "test/test_fx.py::TestCSEPass::test_rand_like",
+    "test/test_fx.py::TestCSEPass::test_rand_n",
+    "test/test_fx.py::TestCSEPass::test_random",
+    "test/test_fx.py::TestCSEPass::test_simple",
+    "test/test_fx.py::TestCSEPass::test_simple_2",
+    "test/test_fx.py::TestCommonPass::test_correctness_CSEPass_MutationInput_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_CSEPass_MutationMetadata_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_CSEPass_MutationTorchTensorCall_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_CSEPass_Mutation_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_CSEPass_ReturnList_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_CSEPass_TakeList_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_factory_CSEPass_FactoryFunctionCall_cpu",
+    "test/test_fx.py::TestCommonPass::test_correctness_factory_CSEPass_MutationFactory_cpu"
+  ],
+  "test_files": [
+    "test/test_fx.py"
+  ],
+  "fix_files": [
+    "torch/fx/operator_schemas.py"
+  ],
+  "created_at": "2026-07-10T19:19:42Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

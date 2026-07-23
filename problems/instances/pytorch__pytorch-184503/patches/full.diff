@@ -1,0 +1,45 @@
+diff --git a/test/dynamo/test_misc.py b/test/dynamo/test_misc.py
+index f31fbc098e5ba..b1c6ac8263864 100644
+--- a/test/dynamo/test_misc.py
++++ b/test/dynamo/test_misc.py
+@@ -744,6 +744,22 @@ def inplace_on_literals(y):
+             self, inplace_on_literals, 1, expected_ops=2
+         )
+ 
++    def test_bool_literal_iand_unspecialized_float(self):
++        @torch.compile(backend="eager")
++        def mul(a: torch.Tensor, b: torch.Tensor, c: float | int | None):
++            has_bias = c is not None
++            has_bias &= c != 0.0
++
++            if has_bias:
++                return a * b + c
++            return a * b
++
++        a = torch.randn(10)
++        b = torch.randn(10)
++
++        self.assertEqual(mul(a, b, c=0.0), a * b)
++        self.assertEqual(mul(a, b, c=0.5), a * b + 0.5)
++
+     def test_unpack4(self):
+         def unpack4(a, b):
+             a = a[:5, :]
+diff --git a/torch/_dynamo/variables/builtin.py b/torch/_dynamo/variables/builtin.py
+index 1227a33b9b8c8..53c00834f485e 100644
+--- a/torch/_dynamo/variables/builtin.py
++++ b/torch/_dynamo/variables/builtin.py
+@@ -2824,10 +2824,12 @@ def call_iand(
+         if isinstance(a, ConstantVariable) and isinstance(b, ConstantVariable):
+             return None
+         if a.is_symnode_like() and b.is_symnode_like():
++            # In-place bitwise ops on immutable bool/int values rebind the local.
++            # Emit the out-of-place op so FX codegen does not assign to a literal.
+             return SymNodeVariable.create(
+                 tx,
+                 tx.output.create_proxy(
+-                    "call_function", operator.iand, *proxy_args_kwargs([a, b], {})
++                    "call_function", operator.and_, *proxy_args_kwargs([a, b], {})
+                 ),
+                 sym_num=None,
+             )

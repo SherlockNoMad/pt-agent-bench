@@ -1,0 +1,50 @@
+diff --git a/test/functorch/test_aotdispatch.py b/test/functorch/test_aotdispatch.py
+index 4644d75239e14..a0a96bf23decd 100644
+--- a/test/functorch/test_aotdispatch.py
++++ b/test/functorch/test_aotdispatch.py
+@@ -640,6 +640,18 @@ def f(a):
+         inp = [torch.randn(3, 1, requires_grad=False)]
+         self.verify_aot_autograd(f, inp, dynamic=True)
+ 
++    def test_to_dense_strided_tensor(self):
++        def f(a):
++            return (
++                a.to_dense(),
++                a.to_dense(masked_grad=True),
++                a.to_dense(dtype=torch.float32),
++                a.to_dense(dtype=torch.float64),
++            )
++
++        inp = [torch.randn(3, 4)]
++        self.verify_aot_autograd(f, inp, dynamic=True)
++
+     def test_complex_linear(self):
+         # https://github.com/pytorch/pytorch/issues/93424
+         inp = [torch.randn(1, 10, 10, dtype=torch.complex64)]
+diff --git a/torch/_subclasses/functional_tensor.py b/torch/_subclasses/functional_tensor.py
+index c908ffd6fb473..e3d5686ad3366 100644
+--- a/torch/_subclasses/functional_tensor.py
++++ b/torch/_subclasses/functional_tensor.py
+@@ -382,7 +382,21 @@ def to_dense(
+         *,
+         masked_grad: builtins.bool | None = None,
+     ) -> torch.Tensor:
+-        return self.elem.to_dense()
++        if self.layout == torch.strided:
++            if dtype is None:
++                return self
++            return self.to(dtype=dtype)
++
++        out = self.elem.to_dense(dtype=dtype, masked_grad=masked_grad)
++        if isinstance(out, torch.Tensor) and torch._is_functional_tensor(out):
++            functional_mode = _detect_infra_mode(
++                torch._C._TorchDispatchModeKey.FUNCTIONAL
++            )
++            if functional_mode is None:
++                raise AssertionError("functional_mode must not be None")
++            with functional_mode:
++                return FunctionalTensor(out, functional_mode)
++        return out
+ 
+     @property
+     # pyrefly: ignore[bad-override]

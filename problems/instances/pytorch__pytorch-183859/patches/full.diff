@@ -1,0 +1,63 @@
+diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py
+index a5f80992b9792..437c9c38ec600 100644
+--- a/test/dynamo/test_repros.py
++++ b/test/dynamo/test_repros.py
+@@ -1486,6 +1486,17 @@ def fn(input_lengths: torch.Tensor, new_ones_1):
+         res = opt_fn(x, y)
+         self.assertTrue(same(ref, res))
+ 
++    def test_integral_inplace_div_aot_eager_raises(self):
++        def fn(x, y):
++            x.div_(y)
++            return x
++
++        opt_fn = torch.compile(fn, backend="aot_eager")
++        with self.assertRaisesRegex(
++            RuntimeError, "can't be cast to the desired output type"
++        ):
++            opt_fn(torch.tensor([1]), torch.tensor([0]))
++
+     @torch._dynamo.config.patch(error_on_recompile=True)
+     @torch.fx.experimental._config.patch(use_duck_shape=False)
+     def test_dynamic_shape_disable_duck_size(self):
+diff --git a/torch/_meta_registrations.py b/torch/_meta_registrations.py
+index a45172be9b342..c3b297caae7a2 100644
+--- a/torch/_meta_registrations.py
++++ b/torch/_meta_registrations.py
+@@ -4543,9 +4543,7 @@ def meta_zero_(self):
+ @register_meta(
+     [
+         aten.mul_.Scalar,
+-        aten.div_.Scalar,
+         aten.mul_.Tensor,
+-        aten.div_.Tensor,
+         aten.logical_and_.default,
+         aten.logical_or_.default,
+         aten.logical_xor_.default,
+@@ -4557,6 +4555,26 @@ def meta_binop_inplace(self, other):
+     return self
+ 
+ 
++@register_meta([aten.div_.Scalar, aten.div_.Tensor])
++def meta_div_inplace(self, other):
++    _, result_dtype = elementwise_dtypes(
++        self,
++        other,
++        type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
++    )
++    torch._check(
++        utils.can_safe_cast_to(cast_from=result_dtype, cast_to=self.dtype),
++        lambda: (
++            f"result type {result_dtype} can't be cast to the desired "
++            f"output type {self.dtype}"
++        ),
++    )
++
++    if isinstance(other, torch.Tensor):
++        check_inplace_broadcast(self.shape, other.shape)
++    return self
++
++
+ @register_meta(
+     [
+         aten.add_.Scalar,

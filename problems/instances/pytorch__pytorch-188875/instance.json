@@ -1,0 +1,47 @@
+{
+  "instance_id": "pytorch__pytorch-188875",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "188872"
+  ],
+  "pull_number": 188875,
+  "base_commit": "a39517a4e6a01bd3f1b5f77a79dcbff330dce861",
+  "problem_statement": "[dynamo] ts and aot_ts backends broken by LazyGraphModule\n\n### \ud83d\udc1b Describe the bug\n\nThe `ts` and `aot_ts` backends fail on any function: `torch.jit.script` cannot script the `_LazyGraphModule` dynamo passes to backends since `use_lazy_graph_module` became the default (#117911). That PR wrapped the tests in `_force_skip_lazy_graph_module()`, so CI stays green while every user call fails.\n\n```python\nimport torch\n\ntorch.compile(lambda x: torch.relu(x) + 1, backend=\"ts\")(torch.randn(4))\n```\n\nRebuilding a plain `GraphModule` before scripting fixes both backends, verified locally.\n\n### Error logs\n\n```\nBackendCompilerFailed: backend='ts' raised:\nRuntimeError:\nmethod cannot be used as a value:\n  File \".../torch/fx/_lazy_graph_module.py\", line 120\n        return cls.forward is cls._lazy_forward\n               ~~~~~~~~~~~ <--- HERE\n```\n\n### Versions\n\n```\nPyTorch version: 2.14.0a0+gitc5bf344\nOS: macOS 26.5.2 (arm64)\nPython version: 3.11.13 (64-bit runtime)\nCPU: Apple M1 Max\n[pip3] torch==2.14.0a0+gitc5bf344\n```",
+  "patch": "diff --git a/torch/_dynamo/backends/debugging.py b/torch/_dynamo/backends/debugging.py\nindex fd9d20506dff6..7290408e5e767 100644\n--- a/torch/_dynamo/backends/debugging.py\n+++ b/torch/_dynamo/backends/debugging.py\n@@ -152,7 +152,9 @@ def inner(*args: Any) -> Any:\n def torchscript(\n     gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor]\n ) -> torch.jit.ScriptModule:\n-    return torch.jit.script(gm)\n+    from torch.fx._lazy_graph_module import _unwrap_lazy_graph_module\n+\n+    return torch.jit.script(_unwrap_lazy_graph_module(gm))\n \n \n def invoke_subgraph_inner_compiler(\ndiff --git a/torch/_functorch/compilers.py b/torch/_functorch/compilers.py\nindex d7982deefadce..fc417f8140b8d 100644\n--- a/torch/_functorch/compilers.py\n+++ b/torch/_functorch/compilers.py\n@@ -79,6 +79,10 @@ def ts_compile(fx_g: fx.GraphModule, inps: Sequence[Any]) -> torch.jit.ScriptMod\n         Torch scripted model.\n     \"\"\"\n \n+    from torch.fx._lazy_graph_module import _unwrap_lazy_graph_module\n+\n+    fx_g = _unwrap_lazy_graph_module(fx_g)\n+\n     with _disable_jit_autocast():\n         strip_overloads(fx_g)\n \ndiff --git a/torch/fx/_lazy_graph_module.py b/torch/fx/_lazy_graph_module.py\nindex 20a7837a66618..ee08a1d4a353a 100644\n--- a/torch/fx/_lazy_graph_module.py\n+++ b/torch/fx/_lazy_graph_module.py\n@@ -68,6 +68,14 @@ def _make_graph_module(\n     return graph_module_cls(*args, **kwargs)\n \n \n+@compatibility(is_backward_compatible=False)\n+def _unwrap_lazy_graph_module(gm: GraphModule) -> GraphModule:\n+    # torch.jit.script cannot script _LazyGraphModule, so rebuild a plain one\n+    if isinstance(gm, _LazyGraphModule):\n+        return GraphModule(gm, gm.graph)\n+    return gm\n+\n+\n @compatibility(is_backward_compatible=False)\n class _LazyGraphModule(GraphModule):\n     \"\"\"\n",
+  "test_patch": "diff --git a/test/dynamo/test_backends.py b/test/dynamo/test_backends.py\nindex f6a7cdd6cf726..b2b564e8db9c7 100644\n--- a/test/dynamo/test_backends.py\n+++ b/test/dynamo/test_backends.py\n@@ -11,7 +11,6 @@\n from torch._dynamo.backends.registry import lookup_backend\n from torch._dynamo.backends.tvm import has_tvm\n from torch._dynamo.testing import same\n-from torch.fx._lazy_graph_module import _force_skip_lazy_graph_module\n from torch.testing._internal.common_device_type import (\n     instantiate_device_type_tests,\n     onlyHPU,\n@@ -139,7 +138,6 @@ def test_eager_noexcept(self, device):\n         self._check_backend_works(\"eager_noexcept\", device, boxed=False)\n \n     @skipIfHpu\n-    @_force_skip_lazy_graph_module()\n     def test_torchscript(self, device):\n         self._check_backend_works(\"ts\", device, boxed=False)\n \n@@ -150,7 +148,6 @@ def test_aot_eager_decomp_partition(self, device):\n         self._check_backend_works(\"aot_eager_decomp_partition\", device)\n \n     @skipIfHpu\n-    @_force_skip_lazy_graph_module()\n     def test_aot_ts(self, device):\n         self._check_backend_works(\"aot_ts\", device)\n \n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_ts_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_torchscript_cpu"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_backends.py::NormalizeIRTests::test_inplace_normalize",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_aot_autograd_api",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_graph_freeze",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_recompilation",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_cudagraphs_backend_accepts_extra_kwargs",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_custom_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_register_backend_api",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend_explicit_override",
+    "test/dynamo/test_backends.py::TestExplainWithBackend::test_explain_with_backend",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_runtime_use_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_list_backends_cpu"
+  ],
+  "test_files": [
+    "test/dynamo/test_backends.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/backends/debugging.py",
+    "torch/_functorch/compilers.py",
+    "torch/fx/_lazy_graph_module.py"
+  ],
+  "created_at": "2026-07-07T20:01:07Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

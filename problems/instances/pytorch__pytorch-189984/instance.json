@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-189984",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "189925"
+  ],
+  "pull_number": 189984,
+  "base_commit": "b248e6c2f6d5e360cf448f6ddfd4f4afd3f3b5e1",
+  "problem_statement": "[dynamo] _io.text_encoding causes a graph break (no polyfill)\n\n### \ud83d\udc1b Describe the bug\n\n`_io.text_encoding` is a C builtin with no traceable Python implementation, so any call through it graph-breaks under `torch.compile`:\n\n```python\nimport torch\n\n@torch.compile(backend=\"eager\", fullgraph=True)\ndef fn(encoding):\n    import _io\n    return _io.text_encoding(encoding)\n\nfn(None)\n```\n\n```\ntorch._dynamo.exc.Unsupported: Attempted to call function marked as skipped\n  Explanation: Dynamo does not know how to trace the builtin `_io.text_encoding.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).\n  ...\n  Developer debug context: module: _io, qualname: text_encoding, skip reason: cannot determine source file for _io (likely a C extension or builtin)\n```\n\nThis function is called internally by several stdlib APIs that accept an `encoding=None` parameter, e.g. `tempfile.NamedTemporaryFile`, `pathlib.Path.read_text`/`write_text`. It's also what causes `test/cpython/v3_13/test_bool.py::BoolTest.test_fileclosed` to silently fall back to eager (rather than tracing fully) when run with `PYTORCH_TEST_WITH_DYNAMO=1` \u2014 that test happens to be decorated with `@torch._dynamo.error_on_graph_break(False)`, so it still reports \"ok\", just with a `UserWarning` on every run instead of full coverage.\n\n`_io.text_encoding` has a well-known pure-Python equivalent shipped in CPython's own `Lib/_pyio.py`:\n\n```python\ndef text_encoding(encoding, stacklevel=2):\n    if encoding is None:\n        if sys.flags.utf8_mode:\n            encoding = \"utf-8\"\n        else:\n            encoding = \"locale\"\n        if sys.flags.warn_default_encoding:\n            import warnings\n            warnings.warn(\"'encoding' argument not specified.\",\n                          EncodingWarning, stacklevel + 1)\n    return encoding\n```\n\nThis looks like a good candidate for a `torch/_dynamo/polyfills/` entry (`substitute_in_graph`), following the existing pattern for `os.fspath` / `sys.intern`.\n\n### Versions\n\nPyTorch version: 2.14.0a0+git377da73\nIs debug build: False\nCUDA used to build PyTorch: None\nROCM used to build PyTorch: N/A\n\nOS: macOS 26.5 (arm64)\nClang version: 21.0.0 (clang-2100.0.123.102)\nCMake version: version 4.3.2\n\nPython version: 3.13.13 (main, Apr 14 2026, 14:32:41) [Clang 22.1.3] (64-bit runtime)\nPython platform: macOS-26.5-arm64-arm-64bit-Mach-O\nIs CUDA available: False\n\nCPU:\nApple M5\n\n\ncc @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @kadeng @amjames @jataylo @azahed98",
+  "patch": "diff --git a/torch/_dynamo/polyfills/__init__.py b/torch/_dynamo/polyfills/__init__.py\nindex 1b332c04758ec..d4a07c009d4cc 100644\n--- a/torch/_dynamo/polyfills/__init__.py\n+++ b/torch/_dynamo/polyfills/__init__.py\n@@ -32,6 +32,7 @@\n         _collections as _collections,\n         builtins as builtins,\n         functools as functools,\n+        io as io,\n         itertools as itertools,\n         operator as operator,\n         os as os,\ndiff --git a/torch/_dynamo/polyfills/io.py b/torch/_dynamo/polyfills/io.py\nnew file mode 100644\nindex 0000000000000..a75e062f46e46\n--- /dev/null\n+++ b/torch/_dynamo/polyfills/io.py\n@@ -0,0 +1,30 @@\n+\"\"\"\n+Python polyfills for _io\n+\"\"\"\n+\n+from __future__ import annotations\n+\n+import _io\n+\n+import sys\n+import warnings\n+\n+from ..decorators import substitute_in_graph\n+\n+\n+__all__ = [\"text_encoding\"]\n+\n+\n+# Copied from Lib/_pyio.py in the standard library\n+# pyrefly: ignore [bad-argument-type]\n+@substitute_in_graph(_io.text_encoding, can_constant_fold_through=True)\n+def text_encoding(encoding: str | None, stacklevel: int = 2, /) -> str:\n+    if encoding is None:\n+        encoding = \"utf-8\" if sys.flags.utf8_mode else \"locale\"\n+        if sys.flags.warn_default_encoding:\n+            warnings.warn(\n+                \"'encoding' argument not specified.\",\n+                EncodingWarning,\n+                stacklevel + 1,\n+            )\n+    return encoding\ndiff --git a/torch/_dynamo/polyfills/loader.py b/torch/_dynamo/polyfills/loader.py\nindex cfce3edfb0ab0..9defe564e45fb 100644\n--- a/torch/_dynamo/polyfills/loader.py\n+++ b/torch/_dynamo/polyfills/loader.py\n@@ -19,6 +19,7 @@\n     \"builtins\",\n     \"copy\",\n     \"functools\",\n+    \"io\",\n     \"itertools\",\n     \"operator\",\n     \"os\",\n",
+  "test_patch": "diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py\nindex 59c768a156602..f38b27952a77a 100644\n--- a/test/dynamo/test_repros.py\n+++ b/test/dynamo/test_repros.py\n@@ -6506,6 +6506,21 @@ def fn(x):\n \n         fn(torch.randn(4))\n \n+    # https://github.com/pytorch/pytorch/issues/189925\n+    def test_io_text_encoding(self):\n+        import _io\n+\n+        @torch.compile(backend=\"eager\", fullgraph=True)\n+        def fn(x):\n+            enc_explicit = _io.text_encoding(\"utf-8\")\n+            enc_default = _io.text_encoding(None)\n+            return torch.sin(x), enc_explicit, enc_default\n+\n+        x = torch.randn(4)\n+        _, enc_explicit, enc_default = fn(x)\n+        self.assertEqual(enc_explicit, _io.text_encoding(\"utf-8\"))\n+        self.assertEqual(enc_default, _io.text_encoding(None))\n+\n     # https://github.com/pytorch/pytorch/issues/88813\n     def test_return_value_duplication_tensor(self) -> None:\n         def fn(val: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_io_text_encoding"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_312_local_cell_overlap",
+    "test/dynamo/test_repros.py::ReproTests::test_Size",
+    "test/dynamo/test_repros.py::ReproTests::test_abc_setattr",
+    "test/dynamo/test_repros.py::ReproTests::test_add_sub_alpha_out",
+    "test/dynamo/test_repros.py::ReproTests::test_addr_alpha_beta_out",
+    "test/dynamo/test_repros.py::ReproTests::test_amp_foreach_fake_impl",
+    "test/dynamo/test_repros.py::ReproTests::test_aot_autograd_runtime_wrapper_prologue_profiled",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_base_with_mutation_works",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_existing_view_banned",
+    "test/dynamo/test_repros.py::ReproTests::test_attached_attribute_in_dir",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_ctx_stash_no_vc_check",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_graph_break",
+    "test/dynamo/test_repros.py::ReproTests::test_avoid_dupe_specialization",
+    "test/dynamo/test_repros.py::ReproTests::test_basic_tensor_subclass_constructor",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_encoding_clone_inputs",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_norm_act",
+    "test/dynamo/test_repros.py::ReproTests::test_batchnorm_e2e",
+    "test/dynamo/test_repros.py::ReproTests::test_bigbird_unsqueeze_inplace"
+  ],
+  "test_files": [
+    "test/dynamo/test_repros.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/polyfills/__init__.py",
+    "torch/_dynamo/polyfills/io.py",
+    "torch/_dynamo/polyfills/loader.py"
+  ],
+  "created_at": "2026-07-19T07:45:14Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

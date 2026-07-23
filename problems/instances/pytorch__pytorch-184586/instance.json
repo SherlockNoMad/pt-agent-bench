@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-184586",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "183268"
+  ],
+  "pull_number": 184586,
+  "base_commit": "ed2342c524dbde2c0e0924e0d454b583bcf9a85f",
+  "problem_statement": "`torch.compile` fails on `Tensor.to_dense()` for strided CUDA tensor with `AssertionError: expected non-functional tensor`\n\n### \ud83d\udc1b Describe the bug\n\n`torch.compile` fails when compiling a function that calls `Tensor.to_dense()` on a regular strided CUDA tensor.\n\nIn eager mode, `x.to_dense()` succeeds and returns `x` itself. However, the compiled version fails inside AOTAutograd / functionalization metadata collection with:\n\n```text\ntorch._dynamo.exc.BackendCompilerFailed: backend='inductor' raised:\nAssertionError: expected non-functional tensor\n```\n\nThe minimal function is:\n```\ndef f(x):\n    return x.to_dense()\n```\n\n### Minimal repro\n```python\n#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\nimport os\nimport platform\nimport traceback\n\nimport torch\n\n\ndef print_env():\n    print(\"Python:\", platform.python_version())\n    print(\"Platform:\", platform.platform())\n    print(\"PyTorch:\", torch.__version__)\n    print(\"CUDA available:\", torch.cuda.is_available())\n    print(\"CUDA device count:\", torch.cuda.device_count())\n    print(\"CUDA_VISIBLE_DEVICES:\", os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"\"))\n    if torch.cuda.is_available():\n        print(\"Current CUDA device:\", torch.cuda.current_device())\n        print(\"CUDA device name:\", torch.cuda.get_device_name(0))\n\n\ndef f(x):\n    return x.to_dense()\n\n\ndef main():\n    print_env()\n\n    if not torch.cuda.is_available():\n        raise RuntimeError(\"This repro expects CUDA.\")\n\n    x = torch.rand(3, 4, device=\"cuda\")\n\n    print(\"\\nRunning eager...\")\n    eager_out = f(x)\n    print(\"Eager succeeded.\")\n    print(\"eager is x:\", eager_out is x)\n    print(\"eager output:\", eager_out)\n\n    print(\"\\nRunning compiled...\")\n    compiled_f = torch.compile(\n        f,\n        backend=\"inductor\",\n        fullgraph=True,\n        dynamic=True,\n    )\n\n    try:\n        compiled_out = compiled_f(x)\n        print(\"Compiled succeeded.\")\n        print(\"compiled output:\", compiled_out)\n        torch.testing.assert_close(eager_out, compiled_out)\n        print(\"Compiled output matches eager.\")\n    except Exception:\n        print(\"Compiled failed:\")\n        traceback.print_exc()\n        raise\n\n\nif __name__ == \"__main__\":\n    main()\n```\n\n### Actual behavior\n\nEager succeeds:\n```\nRunning eager...\nEager succeeded.\neager is x: True\n```\nCompiled execution fails:\n```\ntorch._dynamo.exc.BackendCompilerFailed: backend='inductor' raised:\nAssertionError: expected non-functional tensor\n```\nRelevant stack trace:\n```\nFile \"torch/_functorch/_aot_autograd/collect_metadata_analysis.py\", line 845, in inner\n    fw_graph_outs = pytree.tree_map(from_fun, f_fw_graph_outs)\n\nFile \"torch/_functorch/_aot_autograd/functional_utils.py\", line 82, in from_fun\n    raise AssertionError(\"expected non-functional tensor\")\n```\n\n### Versions\n\n```\nPyTorch version:  2.13.0a0+git059c270\nIs debug build: True\nCUDA used to build PyTorch: 12.6\nROCM used to build PyTorch: N/A\n\nOS: Ubuntu 22.04.4 LTS (x86_64)\nGCC version: (Ubuntu 12.3.0-1ubuntu1~22.04) 12.3.0\nClang version: Could not collect\nCMake version: version 3.22.1\nLibc version: glibc-2.35\n\nPython version: 3.10.16 (main, Dec 11 2024, 16:24:50) [GCC 11.2.0] (64-bit runtime)\nPython platform: Linux-6.8.0-59-generic-x86_64-with-glibc2.35\nIs CUDA available: True\n```\n\ncc @nikitaved @pearu @cpuhrsch @amjames @bhosmer @jcaip @bdhirsh @ezyang @chauhang @penguinwu @bobrenjc93 @aorenste",
+  "patch": "diff --git a/torch/_subclasses/functional_tensor.py b/torch/_subclasses/functional_tensor.py\nindex c908ffd6fb473..e3d5686ad3366 100644\n--- a/torch/_subclasses/functional_tensor.py\n+++ b/torch/_subclasses/functional_tensor.py\n@@ -382,7 +382,21 @@ def to_dense(\n         *,\n         masked_grad: builtins.bool | None = None,\n     ) -> torch.Tensor:\n-        return self.elem.to_dense()\n+        if self.layout == torch.strided:\n+            if dtype is None:\n+                return self\n+            return self.to(dtype=dtype)\n+\n+        out = self.elem.to_dense(dtype=dtype, masked_grad=masked_grad)\n+        if isinstance(out, torch.Tensor) and torch._is_functional_tensor(out):\n+            functional_mode = _detect_infra_mode(\n+                torch._C._TorchDispatchModeKey.FUNCTIONAL\n+            )\n+            if functional_mode is None:\n+                raise AssertionError(\"functional_mode must not be None\")\n+            with functional_mode:\n+                return FunctionalTensor(out, functional_mode)\n+        return out\n \n     @property\n     # pyrefly: ignore[bad-override]\n",
+  "test_patch": "diff --git a/test/functorch/test_aotdispatch.py b/test/functorch/test_aotdispatch.py\nindex 4644d75239e14..a0a96bf23decd 100644\n--- a/test/functorch/test_aotdispatch.py\n+++ b/test/functorch/test_aotdispatch.py\n@@ -640,6 +640,18 @@ def f(a):\n         inp = [torch.randn(3, 1, requires_grad=False)]\n         self.verify_aot_autograd(f, inp, dynamic=True)\n \n+    def test_to_dense_strided_tensor(self):\n+        def f(a):\n+            return (\n+                a.to_dense(),\n+                a.to_dense(masked_grad=True),\n+                a.to_dense(dtype=torch.float32),\n+                a.to_dense(dtype=torch.float64),\n+            )\n+\n+        inp = [torch.randn(3, 4)]\n+        self.verify_aot_autograd(f, inp, dynamic=True)\n+\n     def test_complex_linear(self):\n         # https://github.com/pytorch/pytorch/issues/93424\n         inp = [torch.randn(1, 10, 10, dtype=torch.complex64)]\n",
+  "FAIL_TO_PASS": [
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_to_dense_strided_tensor",
+    "test/functorch/test_aotdispatch.py::TestAOTAutogradWithCache::test_to_dense_strided_tensor",
+    "test/functorch/test_aotdispatch.py::TestAOTAutogradWithDynamo::test_to_dense_strided_tensor"
+  ],
+  "PASS_TO_PASS": [
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_aot_eager_view_replay_for_aliased_outputs_False_dynamic_shapes_False",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_aot_eager_view_replay_for_aliased_outputs_False_dynamic_shapes_True",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_aot_eager_view_replay_for_aliased_outputs_True_dynamic_shapes_False",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_aot_eager_view_replay_for_aliased_outputs_True_dynamic_shapes_True",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_inductor_view_replay_for_aliased_outputs_False_dynamic_shapes_False",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_inductor_view_replay_for_aliased_outputs_False_dynamic_shapes_True",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_inductor_view_replay_for_aliased_outputs_True_dynamic_shapes_False",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_alias_of_intermediate_detach_backend_inductor_view_replay_for_aliased_outputs_True_dynamic_shapes_True",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_mutation_data",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_mutation_forward_inputs",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_mutation_forward_inputs_create_graph",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_mutation_on_grad_out",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_pass_autocast_custom",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_pass_autocast_off",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_backward_pass_autocast_on",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_batchnorm",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_batchnorm_inference",
+    "test/functorch/test_aotdispatch.py::TestAOTAutograd::test_buffer_batch_norm"
+  ],
+  "test_files": [
+    "test/functorch/test_aotdispatch.py"
+  ],
+  "fix_files": [
+    "torch/_subclasses/functional_tensor.py"
+  ],
+  "created_at": "2026-06-06T14:06:43Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

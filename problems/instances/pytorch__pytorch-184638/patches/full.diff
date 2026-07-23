@@ -1,0 +1,159 @@
+diff --git a/.ci/lumen_cli/cli/lib/core/vllm/vllm_test.py b/.ci/lumen_cli/cli/lib/core/vllm/vllm_test.py
+index 7693be1e80ddd..7d027082a94b6 100644
+--- a/.ci/lumen_cli/cli/lib/core/vllm/vllm_test.py
++++ b/.ci/lumen_cli/cli/lib/core/vllm/vllm_test.py
+@@ -216,6 +216,8 @@ def _install_dependencies(self):
+ 
+     def _set_envs(self, inputs: VllmTestParameters):
+         os.environ["TORCH_CUDA_ARCH_LIST"] = inputs.torch_cuda_arch_list
++        # vLLM has known third-party custom ops with aliasing schemas.
++        os.environ["TORCHINDUCTOR_ERROR_ON_CUSTOM_OP_ALIASING"] = "0"
+         if not validate_cuda(get_env("TORCH_CUDA_ARCH_LIST")):
+             logger.warning(
+                 "Missing supported TORCH_CUDA_ARCH_LIST. "
+diff --git a/.ci/lumen_cli/tests/test_vllm.py b/.ci/lumen_cli/tests/test_vllm.py
+index 8e468694f7d9e..4a5b4a2bddaa3 100644
+--- a/.ci/lumen_cli/tests/test_vllm.py
++++ b/.ci/lumen_cli/tests/test_vllm.py
+@@ -2,9 +2,11 @@
+ import tempfile
+ import unittest
+ from pathlib import Path
++from types import SimpleNamespace
+ from unittest.mock import MagicMock, patch
+ 
+ import cli.lib.core.vllm.vllm_build as vllm_build
++import cli.lib.core.vllm.vllm_test as vllm_test
+ 
+ 
+ _VLLM_BUILD_MODULE = "cli.lib.core.vllm.vllm_build"
+@@ -175,3 +177,29 @@ def test_run_calls_clone_prepare_and_build(
+         _, kwargs = mock_run.call_args
+         if kwargs.get("cwd") != "vllm":
+             raise AssertionError(f"Expected cwd='vllm', got cwd={kwargs.get('cwd')!r}")
++
++
++class TestVllmTestRunner(unittest.TestCase):
++    @patch.dict(
++        os.environ,
++        {
++            "CI": "1",
++            "HF_HOME": "/tmp/hf",
++            "VLLM_TEST_HUGGING_FACE_TOKEN": "token",
++        },
++        clear=True,
++    )
++    def test_set_envs_disables_custom_op_aliasing_errors(self):
++        args = SimpleNamespace(
++            shard_id=1,
++            num_shards=1,
++            test_plan="vllm_basic_correctness_test",
++        )
++        runner = vllm_test.VllmTestRunner(args)
++        params = SimpleNamespace(torch_cuda_arch_list="8.0")
++
++        runner._set_envs(params)
++
++        self.assertEqual(os.environ["TORCH_CUDA_ARCH_LIST"], "8.0")
++        self.assertEqual(os.environ["HF_TOKEN"], "token")
++        self.assertEqual(os.environ["TORCHINDUCTOR_ERROR_ON_CUSTOM_OP_ALIASING"], "0")
+diff --git a/test/dynamo/test_misc.py b/test/dynamo/test_misc.py
+index 8f76dacae9504..05db81b2139b2 100644
+--- a/test/dynamo/test_misc.py
++++ b/test/dynamo/test_misc.py
+@@ -20,6 +20,7 @@
+ import pickle
+ import random
+ import re
++import subprocess
+ import sys
+ import tempfile
+ import threading
+@@ -15626,6 +15627,68 @@ def fn(x):
+                     "to not return y. This is deprecated and will become an error in a future version of PyTorch.",
+                 )
+ 
++    def test_debugmode_respects_custom_op_aliasing_env_override(self):
++        default_script = """
++from torch._functorch import config as functorch_config
++assert functorch_config.error_on_custom_op_aliasing is True
++"""
++        default_env = os.environ.copy()
++        default_env["CI"] = "1"
++        default_env.pop("TORCHINDUCTOR_ERROR_ON_CUSTOM_OP_ALIASING", None)
++        default_result = subprocess.run(
++            [sys.executable, "-c", default_script],
++            env=default_env,
++            capture_output=True,
++            text=True,
++        )
++        self.assertEqual(
++            default_result.returncode,
++            0,
++            msg=f"stdout:\n{default_result.stdout}\nstderr:\n{default_result.stderr}",
++        )
++
++        script = """
++import warnings
++import torch
++from torch._functorch import config as functorch_config
++
++assert functorch_config.error_on_custom_op_aliasing is False
++with torch.library._scoped_library("mylib_ci", "FRAGMENT") as lib:
++    lib.define("alias_op(Tensor x) -> Tensor")
++    lib.impl("alias_op", lambda x: x.view_as(x), "CompositeExplicitAutograd")
++    lib.impl("alias_op", lambda x: x.view_as(x), "Meta")
++
++    def fn(x):
++        return torch.ops.mylib_ci.alias_op(x) + 1
++
++    compiled_fn = torch.compile(fn, fullgraph=True, backend="aot_eager")
++    with warnings.catch_warnings(record=True) as caught:
++        warnings.simplefilter("always")
++        compiled_fn(torch.randn(4))
++    aliasing_warnings = [
++        warning
++        for warning in caught
++        if "may not alias any inputs" in str(warning.message)
++    ]
++    assert len(aliasing_warnings) == 1, [
++        str(warning.message) for warning in caught
++    ]
++"""
++        env = os.environ.copy()
++        env["CI"] = "1"
++        env["TORCHINDUCTOR_ERROR_ON_CUSTOM_OP_ALIASING"] = "0"
++        result = subprocess.run(
++            [sys.executable, "-c", script],
++            env=env,
++            capture_output=True,
++            text=True,
++        )
++        self.assertEqual(
++            result.returncode,
++            0,
++            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
++        )
++
+     def test_make_contiguous_strides_for_under_compile(self):
+         # is_nested_int and sym_max must be traceable under Dynamo.
+         from torch._prims_common import make_contiguous_strides_for
+diff --git a/torch/_functorch/config.py b/torch/_functorch/config.py
+index 64985b02f099a..197c60c24656b 100644
+--- a/torch/_functorch/config.py
++++ b/torch/_functorch/config.py
+@@ -104,9 +104,12 @@
+ #
+ # Deprecated: Custom ops returning aliased outputs is deprecated and will
+ # become an error in a future version of PyTorch. Currently error_on_custom_op_aliasing
+-# is True only in CI.
++# is True in CI unless explicitly overridden.
+ check_custom_op_aliasing = True
+-error_on_custom_op_aliasing = bool(os.getenv("CI"))
++error_on_custom_op_aliasing: bool = Config(
++    env_name_force="TORCHINDUCTOR_ERROR_ON_CUSTOM_OP_ALIASING",
++    default=bool(os.getenv("CI")),
++)
+ 
+ 
+ def remote_autograd_cache_default() -> bool | None:

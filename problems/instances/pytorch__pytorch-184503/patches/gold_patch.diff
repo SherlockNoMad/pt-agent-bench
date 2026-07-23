@@ -1,0 +1,18 @@
+diff --git a/torch/_dynamo/variables/builtin.py b/torch/_dynamo/variables/builtin.py
+index 1227a33b9b8c8..53c00834f485e 100644
+--- a/torch/_dynamo/variables/builtin.py
++++ b/torch/_dynamo/variables/builtin.py
+@@ -2824,10 +2824,12 @@ def call_iand(
+         if isinstance(a, ConstantVariable) and isinstance(b, ConstantVariable):
+             return None
+         if a.is_symnode_like() and b.is_symnode_like():
++            # In-place bitwise ops on immutable bool/int values rebind the local.
++            # Emit the out-of-place op so FX codegen does not assign to a literal.
+             return SymNodeVariable.create(
+                 tx,
+                 tx.output.create_proxy(
+-                    "call_function", operator.iand, *proxy_args_kwargs([a, b], {})
++                    "call_function", operator.and_, *proxy_args_kwargs([a, b], {})
+                 ),
+                 sym_num=None,
+             )

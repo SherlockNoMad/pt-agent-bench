@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-185777",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "148349"
+  ],
+  "pull_number": 185777,
+  "base_commit": "c925572a975ef2382d31e65c3de84bfec39d93e5",
+  "problem_statement": "torch._check(x > 0) should do something sane when x is a Tensor\n\n```py\ndef f(x):\n    torch._check(x > 0)\n    return torch.log(x)\n\ntorch.compile(f)(torch.rand(1))\n```\n\ngives\n```\nTorchRuntimeError: Failed running call_function <function _check at 0x7f7cf0322fc0>(*(FakeTensor(..., size=(1,), dtype=torch.bool),), **{}):\ncond must be a bool, but got <class 'torch._subclasses.fake_tensor.FakeTensor'>\n\nfrom user code:\n   File \"/tmp/ipykernel_1454634/3269954531.py\", line 2, in f\n    torch._check(x > 0)\n\nSet TORCH_LOGS=\"+dynamo\" and TORCHDYNAMO_VERBOSE=1 for more information\n```\n\nIf this isn't supported then we should make the error message clearer -- the user doesn't necessarily know what a FakeTensor is.\n\nThe thread at https://discuss.pytorch.org/t/torch-check-failing-with-torch-compile/215443 implies that there is a workaround\n\ncc @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @chenyang78 @kadeng @amjames",
+  "patch": "diff --git a/torch/__init__.py b/torch/__init__.py\nindex ea1ea3d6d079f..c174e8e1ef112 100644\n--- a/torch/__init__.py\n+++ b/torch/__init__.py\n@@ -1716,6 +1716,12 @@ def _check_with(\n     message: _Callable[[], str],\n ):\n     if not isinstance(cond, (builtins.bool, SymBool)):\n+        if isinstance(cond, torch.Tensor):\n+            raise TypeError(\n+                \"cond must be a bool, but got a Tensor. \"\n+                \"For tensor conditions, use torch._check_tensor_all() \"\n+                \"to assert that all elements are true.\"\n+            )\n         raise TypeError(f\"cond must be a bool, but got {type(cond)}\")\n \n     from torch.fx.experimental.symbolic_shapes import expect_true\ndiff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py\nindex 34277df783839..6da3675bb722d 100644\n--- a/torch/_dynamo/variables/torch.py\n+++ b/torch/_dynamo/variables/torch.py\n@@ -2461,6 +2461,14 @@ def check_impl(\n                     f\"{self.value.__name__}() missing 1 required positional argument: 'cond'\",\n                 )\n \n+            if predicate_vt.is_tensor():\n+                raise_type_error(\n+                    tx,\n+                    \"cond must be a bool, but got a Tensor. \"\n+                    \"For tensor conditions, use torch._check_tensor_all() \"\n+                    \"to assert that all elements are true.\",\n+                )\n+\n             message_eager = None\n             message_graph_proxy = None\n             if message_vt is not None:\n",
+  "test_patch": "diff --git a/test/dynamo/test_misc.py b/test/dynamo/test_misc.py\nindex 62c7cd34a6e2d..0d3cd5a4d157c 100644\n--- a/test/dynamo/test_misc.py\n+++ b/test/dynamo/test_misc.py\n@@ -2278,6 +2278,19 @@ def f(x):\n         x = torch.tensor([1.0, 2.0, 3.0])\n         self.assertEqual(f(x), x + 1)\n \n+    def test_check_tensor_predicate_raises_clear_error(self):\n+        @torch.compile(backend=\"eager\")\n+        def f(x):\n+            torch._check(x > 0)\n+            return torch.log(x)\n+\n+        with self.assertRaisesRegex(\n+            TypeError, r\"cond must be a bool.*torch[.]_check_tensor_all\"\n+        ) as cm:\n+            f(torch.rand(1))\n+\n+        self.assertNotIn(\"FakeTensor\", str(cm.exception))\n+\n     def test_check_with_closure_constant(self):\n         @torch.compile(backend=\"eager\", fullgraph=True)\n         def f(x):\ndiff --git a/test/test_torch.py b/test/test_torch.py\nindex dc1ceb58bf93c..00a2a62e4c4d2 100644\n--- a/test/test_torch.py\n+++ b/test/test_torch.py\n@@ -6770,7 +6770,9 @@ def message():\n             with self.assertRaisesRegex(TypeError, 'cond must be a bool'):\n                 check_fn('wrong type')\n \n-            with self.assertRaisesRegex(TypeError, 'cond must be a bool'):\n+            with self.assertRaisesRegex(\n+                TypeError, r'cond must be a bool.*torch[.]_check_tensor_all'\n+            ):\n                 check_fn(torch.tensor(True))\n \n     # FIXME: move to indexing test suite\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_misc.py::MiscTests::test_check_tensor_predicate_raises_clear_error"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_misc.py::MiscTests::test_312_binary_slice_with_graph_break1",
+    "test/dynamo/test_misc.py::MiscTests::test_312_binary_slice_with_graph_break2",
+    "test/dynamo/test_misc.py::MiscTests::test_RAISE_VARARGS_0",
+    "test/dynamo/test_misc.py::MiscTests::test_T_tensor_attribute",
+    "test/dynamo/test_misc.py::MiscTests::test___build_class__",
+    "test/dynamo/test_misc.py::MiscTests::test___build_class___disabled",
+    "test/dynamo/test_misc.py::MiscTests::test_add_sizes",
+    "test/dynamo/test_misc.py::MiscTests::test_add_to_set",
+    "test/dynamo/test_misc.py::MiscTests::test_anomaly_aot_autograd",
+    "test/dynamo/test_misc.py::MiscTests::test_any_all_symnode",
+    "test/dynamo/test_misc.py::MiscTests::test_aot_autograd_propagate_unbacked_symints_shape",
+    "test/dynamo/test_misc.py::MiscTests::test_arange_length_with_float32_dtype",
+    "test/dynamo/test_misc.py::MiscTests::test_argwhere_with_dynamic_shapes",
+    "test/dynamo/test_misc.py::MiscTests::test_assert",
+    "test/dynamo/test_misc.py::MiscTests::test_assert_size_stride",
+    "test/dynamo/test_misc.py::MiscTests::test_assigning_function_to_class_attribute",
+    "test/dynamo/test_misc.py::MiscTests::test_assigning_function_to_object_attribute",
+    "test/dynamo/test_misc.py::MiscTests::test_backend_match_guard"
+  ],
+  "test_files": [
+    "test/dynamo/test_misc.py",
+    "test/test_torch.py"
+  ],
+  "fix_files": [
+    "torch/__init__.py",
+    "torch/_dynamo/variables/torch.py"
+  ],
+  "created_at": "2026-06-04T08:11:25Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": true
+  }
+}

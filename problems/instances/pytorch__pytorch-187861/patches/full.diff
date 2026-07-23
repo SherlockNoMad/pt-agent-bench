@@ -1,0 +1,73 @@
+diff --git a/test/nn/test_pooling.py b/test/nn/test_pooling.py
+index 03477f47ad1ad..c95bc1ac05a86 100644
+--- a/test/nn/test_pooling.py
++++ b/test/nn/test_pooling.py
+@@ -916,6 +916,24 @@ def test_LPPool1d_kernel_size_overflow_large(self, device):
+         with self.assertRaisesRegex(RuntimeError, "value cannot be converted to type"):
+             avgpool(inp)
+ 
++    def test_lp_pool_norm_type_zero(self, device):
++        err = "norm_type must be a non-zero value"
++        x1 = torch.randn(1, 4, 8, device=device)
++        x2 = torch.randn(1, 4, 8, 8, device=device)
++        x3 = torch.randn(1, 4, 8, 8, 8, device=device)
++        with self.assertRaisesRegex(ValueError, err):
++            F.lp_pool1d(x1, norm_type=0, kernel_size=3)
++        with self.assertRaisesRegex(ValueError, err):
++            F.lp_pool2d(x2, norm_type=0, kernel_size=3)
++        with self.assertRaisesRegex(ValueError, err):
++            F.lp_pool3d(x3, norm_type=0, kernel_size=3)
++        with self.assertRaisesRegex(ValueError, err):
++            torch.nn.LPPool1d(norm_type=0, kernel_size=3)
++        with self.assertRaisesRegex(ValueError, err):
++            torch.nn.LPPool2d(norm_type=0, kernel_size=3)
++        with self.assertRaisesRegex(ValueError, err):
++            torch.nn.LPPool3d(norm_type=0, kernel_size=3)
++
+     def test_AvgPool2d_empty(self, device):
+         avgpool = torch.nn.AvgPool2d(3, stride=2).to(device)
+         inp = torch.randn(0, 16, 20, 32, device=device)
+diff --git a/torch/nn/functional.py b/torch/nn/functional.py
+index 64759da59830f..9f5f6b62e6601 100644
+--- a/torch/nn/functional.py
++++ b/torch/nn/functional.py
+@@ -1138,6 +1138,8 @@ def lp_pool3d(
+         )
+     kd, kw, kh = _triple(kernel_size)
+     if isinstance(norm_type, (int, float)):
++        if norm_type == 0:
++            raise ValueError(f"norm_type must be a non-zero value, but got {norm_type}")
+         if norm_type == float("inf"):
+             return max_pool3d(input.abs(), kernel_size, stride, 0, 1, ceil_mode)
+         if norm_type == -float("inf"):
+@@ -1185,6 +1187,8 @@ def lp_pool2d(
+         )
+     kw, kh = _pair(kernel_size)
+     if isinstance(norm_type, (int, float)):
++        if norm_type == 0:
++            raise ValueError(f"norm_type must be a non-zero value, but got {norm_type}")
+         if norm_type == float("inf"):
+             return max_pool2d(input.abs(), kernel_size, stride, 0, 1, ceil_mode)
+         if norm_type == -float("inf"):
+@@ -1228,6 +1232,8 @@ def lp_pool1d(
+             ceil_mode=ceil_mode,
+         )
+     if isinstance(norm_type, (int, float)):
++        if norm_type == 0:
++            raise ValueError(f"norm_type must be a non-zero value, but got {norm_type}")
+         if norm_type == float("inf"):
+             return max_pool1d(input.abs(), kernel_size, stride, 0, 1, ceil_mode)
+         if norm_type == -float("inf"):
+diff --git a/torch/nn/modules/pooling.py b/torch/nn/modules/pooling.py
+index f8c7cc1200300..d8d79d1a65cdd 100644
+--- a/torch/nn/modules/pooling.py
++++ b/torch/nn/modules/pooling.py
+@@ -1110,6 +1110,8 @@ def __init__(
+         ceil_mode: bool = False,
+     ) -> None:
+         super().__init__()
++        if norm_type == 0:
++            raise ValueError(f"norm_type must be a non-zero value, but got {norm_type}")
+         self.norm_type = norm_type
+         self.kernel_size = kernel_size
+         self.stride = stride

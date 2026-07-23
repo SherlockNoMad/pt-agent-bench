@@ -1,0 +1,50 @@
+{
+  "instance_id": "pytorch__pytorch-185277",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "161211"
+  ],
+  "pull_number": 185277,
+  "base_commit": "6abf1fd15748b85a0c64c0078a11e7d3592814cb",
+  "problem_statement": "[dynamo] Various graph breaks from accelerate cpu offloading\n\n### \ud83d\udc1b Describe the bug\n\nSimilar to #161207, but a different kind of graph break, due to a lot of `is_xxxbackend_available()` calls from [accelerate](https://github.com/huggingface/accelerate/blob/979d81e4a92d08861f34fa6fbb66480b20771e76/src/accelerate/utils/memory.py#L43-L64).\n\nThese won't affect performance, until the `clear_device_cache` gets invoked in the middle of the compilation (rather than at the boundary, which is what I observed in my case).\n\n```python\nimport torch\nfrom diffusers import FluxPipeline\n\npipe = FluxPipeline.from_pretrained(\"black-forest-labs/FLUX.1-dev\", torch_dtype=torch.bfloat16)\npipe.enable_model_cpu_offload() #save some VRAM by offloading the model to CPU. Remove this if you have enough GPU power\npipe.transformer.compile()\n\nprompt = \"A cat holding a sign that says hello world\"\nimage = pipe(\n    prompt,\n    height=1024,\n    width=1024,\n    guidance_scale=3.5,\n    num_inference_steps=50,\n    max_sequence_length=512,\n    generator=torch.Generator(\"cpu\").manual_seed(0)\n).images[0]\nimage.save(\"flux-dev.png\")\n```\n\n### Error logs\n\nP1913031750\n\n### Versions\n\nPython 3.11.11, nightly 3caddd4daa5.\n\ncc @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @chenyang78 @kadeng @amjames @Lucaskabela",
+  "patch": "diff --git a/torch/_dynamo/trace_rules.py b/torch/_dynamo/trace_rules.py\nindex db6190298be4c..cf6c958a5fd23 100644\n--- a/torch/_dynamo/trace_rules.py\n+++ b/torch/_dynamo/trace_rules.py\n@@ -187,6 +187,8 @@\n     \"torch._utils._maybe_view_chunk_cat\": UserFunctionVariable,\n     \"torch.fx._symbolic_trace.is_fx_tracing\": TorchInGraphFunctionVariable,\n     \"torch.fx._symbolic_trace.is_fx_symbolic_tracing\": TorchInGraphFunctionVariable,\n+    \"torch.mps.is_available\": TorchInGraphFunctionVariable,\n+    \"torch.mtia.is_available\": TorchInGraphFunctionVariable,\n     \"torch._dynamo.external_utils.is_compiling\": TorchInGraphFunctionVariable,\n     \"torch._dynamo.utils._disable_side_effect_safety_checks_for_current_subtracer\": UserFunctionVariable,\n     \"torch.compiler.is_compiling\": TorchInGraphFunctionVariable,\ndiff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py\nindex a62851e7aba07..0e79d3a8e5cca 100644\n--- a/torch/_dynamo/variables/torch.py\n+++ b/torch/_dynamo/variables/torch.py\n@@ -190,6 +190,8 @@\n     torch._C._get_cublas_allow_tf32,\n     torch._C._is_any_autocast_enabled,\n     torch.accelerator.is_available,\n+    torch.backends.mps.is_available.__wrapped__,  # type: ignore[attr-defined]\n+    torch.backends.mps.is_built,\n     torch.cuda.get_device_properties,\n     torch.cuda.is_available,\n     torch.distributed.is_available,\n@@ -205,6 +207,8 @@\n     torch.promote_types,\n     torch._C._get_privateuse1_backend_name,\n     torch.autograd._is_checkpoint_valid,\n+    torch.mps.is_available,\n+    torch.mtia.is_available,\n     torch.xpu.get_device_properties,\n     torch.xpu.is_available,\n ] + constant_fold_functions_need_guards\n",
+  "test_patch": "diff --git a/test/dynamo/test_functions.py b/test/dynamo/test_functions.py\nindex 1196f2f6b0fa2..0916c4c44cd70 100644\n--- a/test/dynamo/test_functions.py\n+++ b/test/dynamo/test_functions.py\n@@ -2627,6 +2627,60 @@ def test_distributed_is_available(x):\n         else:\n             return x - 1\n \n+    def test_backend_availability_predicates(self):\n+        def is_mps_available():\n+            return (\n+                hasattr(torch.backends, \"mps\")\n+                and torch.backends.mps.is_available()\n+                and torch.backends.mps.is_built()\n+            )\n+\n+        def is_mtia_available():\n+            return hasattr(torch, \"mtia\") and torch.mtia.is_available()\n+\n+        def clear_device_cache_like(x):\n+            if is_mps_available():\n+                return x + 1\n+            elif torch.mps.is_available():\n+                return x + 2\n+            elif is_mtia_available():\n+                return x + 3\n+            elif torch.cuda.is_available():\n+                return x + 4\n+            elif torch.xpu.is_available():\n+                return x + 5\n+            elif torch.accelerator.is_available():\n+                return x + 6\n+            return x - 1\n+\n+        x = torch.randn(3)\n+        opt_fn = torch.compile(clear_device_cache_like, backend=\"eager\", fullgraph=True)\n+        self.assertEqual(opt_fn(x), clear_device_cache_like(x))\n+\n+        def top_level_predicates(x):\n+            if torch.mps.is_available():\n+                x = x + 7\n+            else:\n+                x = x - 7\n+            if torch.mtia.is_available():\n+                x = x + 11\n+            else:\n+                x = x - 11\n+            return x\n+\n+        opt_fn = torch.compile(top_level_predicates, backend=\"eager\", fullgraph=True)\n+        self.assertEqual(opt_fn(x), top_level_predicates(x))\n+\n+    def test_backend_mps_is_built(self):\n+        def fn(x):\n+            if torch.backends.mps.is_built():\n+                return x + 1\n+            return x - 1\n+\n+        x = torch.randn(3)\n+        opt_fn = torch.compile(fn, backend=\"eager\", fullgraph=True)\n+        self.assertEqual(opt_fn(x), fn(x))\n+\n     @unittest.skipIf(\n         not torch.distributed.is_available(), \"requires distributed package\"\n     )\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_functions.py::FunctionTests::test_backend_availability_predicates",
+    "test/dynamo/test_functions.py::FunctionTests::test_backend_mps_is_built"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_functions.py::FunctionTests::test_T",
+    "test/dynamo/test_functions.py::FunctionTests::test_add",
+    "test/dynamo/test_functions.py::FunctionTests::test_add_",
+    "test/dynamo/test_functions.py::FunctionTests::test_addcdiv",
+    "test/dynamo/test_functions.py::FunctionTests::test_addcdiv_",
+    "test/dynamo/test_functions.py::FunctionTests::test_addcmul_",
+    "test/dynamo/test_functions.py::FunctionTests::test_are_functorch_transforms_active",
+    "test/dynamo/test_functions.py::FunctionTests::test_attrgetter",
+    "test/dynamo/test_functions.py::FunctionTests::test_broadcast_foreach_pow",
+    "test/dynamo/test_functions.py::FunctionTests::test_build_list_unpack",
+    "test/dynamo/test_functions.py::FunctionTests::test_call_dict1",
+    "test/dynamo/test_functions.py::FunctionTests::test_call_dict2",
+    "test/dynamo/test_functions.py::FunctionTests::test_call_dict3",
+    "test/dynamo/test_functions.py::FunctionTests::test_call_dict4",
+    "test/dynamo/test_functions.py::FunctionTests::test_call_dict5",
+    "test/dynamo/test_functions.py::FunctionTests::test_callable_builtin",
+    "test/dynamo/test_functions.py::FunctionTests::test_callable_class",
+    "test/dynamo/test_functions.py::FunctionTests::test_callable_lambda",
+    "test/dynamo/test_functions.py::FunctionTests::test_callable_list",
+    "test/dynamo/test_functions.py::FunctionTests::test_callable_torch"
+  ],
+  "test_files": [
+    "test/dynamo/test_functions.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/trace_rules.py",
+    "torch/_dynamo/variables/torch.py"
+  ],
+  "created_at": "2026-06-24T03:00:36Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

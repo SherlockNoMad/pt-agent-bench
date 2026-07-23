@@ -1,0 +1,49 @@
+diff --git a/torch/_dynamo/variables/misc.py b/torch/_dynamo/variables/misc.py
+index 29d58854b8aca..557ea69dabdfc 100644
+--- a/torch/_dynamo/variables/misc.py
++++ b/torch/_dynamo/variables/misc.py
+@@ -761,9 +761,15 @@ class DelayGraphBreakVariable(UnknownVariable):
+     Used to insert a dummy variable in the stack to do the graph break at CALL_FUNCTION.
+     """
+ 
+-    def __init__(self, msg: str | None = None, **kwargs: Any) -> None:
++    def __init__(
++        self,
++        msg: str | None = None,
++        hints: list[str] | None = None,
++        **kwargs: Any,
++    ) -> None:
+         super().__init__(**kwargs)
+         self.msg = msg
++        self.hints = hints or []
+ 
+     def call_function(
+         self,
+@@ -777,7 +783,7 @@ def call_function(
+             context=f"source: {self.source}",
+             explanation="Dynamo determined that a graph break should occur "
+             f"when calling `{name}`. Reason: {self.msg}",
+-            hints=[],
++            hints=self.hints,
+         )
+ 
+ 
+diff --git a/torch/_dynamo/variables/tensor.py b/torch/_dynamo/variables/tensor.py
+index 36ad8adab35a7..4028363edbce0 100644
+--- a/torch/_dynamo/variables/tensor.py
++++ b/torch/_dynamo/variables/tensor.py
+@@ -693,6 +693,14 @@ def var_getattr(
+                 return variables.misc.DelayGraphBreakVariable(
+                     source=AttrSource(self.source, name),
+                     msg="Getting an inplace view on a graph input is not supported",
++                    hints=[
++                        "Avoid mutating a graph input's tensor metadata with in-place view ops. "
++                        "If the mutation is only needed inside the compiled region, replace the in-place call "
++                        "with an out-of-place view, for example `x = x.transpose(1, 2)` instead of "
++                        "`x.transpose_(1, 2)`.",
++                        "If you need to mutate the input tensor's metadata, move the in-place view call outside "
++                        "`torch.compile`.",
++                    ],
+                 )
+ 
+         # For attributes (not methods) that were not caught in the special handling above,

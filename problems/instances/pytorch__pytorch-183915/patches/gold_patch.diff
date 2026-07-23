@@ -1,0 +1,15 @@
+diff --git a/torch/_dynamo/variables/torch.py b/torch/_dynamo/variables/torch.py
+index 30d3caa4897d8..8e6531318a3b3 100644
+--- a/torch/_dynamo/variables/torch.py
++++ b/torch/_dynamo/variables/torch.py
+@@ -1596,7 +1596,9 @@ def handle_full(
+             fill_value: VariableTracker,
+             **kwargs: VariableTracker,
+         ) -> VariableTracker | None:
+-            if fill_value.is_tensor():
++            if fill_value.is_tensor() and not issubclass(
++                fill_value.python_type(), torch.nn.Parameter
++            ):
+                 # Decompose: create empty tensor and fill it
+                 # This avoids the scalar extraction at compile time
+                 empty_result = TorchInGraphFunctionVariable(torch.empty).call_function(

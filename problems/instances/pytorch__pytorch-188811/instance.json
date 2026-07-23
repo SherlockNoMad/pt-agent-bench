@@ -1,0 +1,46 @@
+{
+  "instance_id": "pytorch__pytorch-188811",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "188809"
+  ],
+  "pull_number": 188811,
+  "base_commit": "b20957f87699a65bfb7d80fd9ff2dd8bc30f2deb",
+  "problem_statement": "tvm_meta_schedule / tvm_auto_scheduler backends raise TypeError on every call\n\n### \ud83d\udc1b Describe the bug\n\nBoth partials in torch/_dynamo/backends/tvm.py pass scheduler=..., but tvm() only accepts options, so they always fail:\n\n```\nimport torch\nfrom torch._dynamo.backends.tvm import tvm_meta_schedule\n\ntorch.compile(lambda x: x + 1, backend=tvm_meta_schedule)(torch.randn(2))\n```\n\n\n### Error logs\n\n```\nBackendCompilerFailed: ... raised:\nTypeError: tvm() got an unexpected keyword argument 'scheduler'\n```\n\nFails before import tvm, so it reproduces without TVM installed. Fix: pass options={\"scheduler\": ...} instead.\n\n### Versions\n\nPyTorch version: 2.14.0a0+gitc5bf344\nIs debug build: False\nCUDA used to build PyTorch: None\nROCM used to build PyTorch: N/A\n\nOS: macOS 26.5.2 (arm64)\nGCC version: Could not collect\nClang version: 17.0.0 (clang-1700.0.13.5)\nCMake version: version 4.3.4\nLibc version: N/A\n\ncc @chauhang @penguinwu",
+  "patch": "diff --git a/torch/_dynamo/backends/tvm.py b/torch/_dynamo/backends/tvm.py\nindex c25a5a5f286e7..5baec92302112 100644\n--- a/torch/_dynamo/backends/tvm.py\n+++ b/torch/_dynamo/backends/tvm.py\n@@ -182,8 +182,12 @@ def exec_tvm(*i_args: torch.Tensor) -> list[torch.Tensor]:\n     return exec_tvm\n \n \n-tvm_meta_schedule = functools.partial(tvm, scheduler=\"meta_schedule\")\n-tvm_auto_scheduler = functools.partial(tvm, scheduler=\"auto_scheduler\")\n+tvm_meta_schedule = functools.partial(\n+    tvm, options=MappingProxyType({\"scheduler\": \"meta_schedule\"})\n+)\n+tvm_auto_scheduler = functools.partial(\n+    tvm, options=MappingProxyType({\"scheduler\": \"auto_scheduler\"})\n+)\n \n \n def has_tvm() -> bool:\n",
+  "test_patch": "diff --git a/test/dynamo/test_backends.py b/test/dynamo/test_backends.py\nindex 9754a3d9a9492..f6a7cdd6cf726 100644\n--- a/test/dynamo/test_backends.py\n+++ b/test/dynamo/test_backends.py\n@@ -1,4 +1,5 @@\n # Owner(s): [\"module: dynamo\"]\n+import sys\n import unittest\n from unittest.mock import MagicMock, patch\n \n@@ -163,6 +164,16 @@ def test_tvm(self, device):\n         self._check_backend_works(\"tvm\", device, options={\"scheduler\": None})\n         self._check_backend_works(\"tvm\", device, options={\"opt_level\": 0})\n \n+    def test_tvm_scheduler_backends(self, device):\n+        from torch._dynamo.backends.tvm import tvm_auto_scheduler, tvm_meta_schedule\n+\n+        gm = torch.fx.symbolic_trace(lambda x: x + 1)\n+        for backend in (tvm_meta_schedule, tvm_auto_scheduler):\n+            # blocking the tvm import keeps this fast and deterministic;\n+            # reaching ImportError proves the partial's kwargs are valid\n+            with patch.dict(sys.modules, {\"tvm\": None}):\n+                self.assertRaises(ImportError, backend, gm, [torch.randn(2)])\n+\n     @onlyHPU\n     def test_intel_gaudi_backend(self, device):\n         self._check_backend_works(\"hpu_backend\", device)\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_tvm_scheduler_backends_cpu"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_backends.py::NormalizeIRTests::test_inplace_normalize",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_aot_autograd_api",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_graph_freeze",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_backend_recompilation",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_cudagraphs_backend_accepts_extra_kwargs",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_lookup_custom_backend",
+    "test/dynamo/test_backends.py::TestCustomBackendAPI::test_register_backend_api",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend",
+    "test/dynamo/test_backends.py::TestDefaultBackend::test_set_default_backend_explicit_override",
+    "test/dynamo/test_backends.py::TestExplainWithBackend::test_explain_with_backend",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_eager_decomp_partition_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_aot_ts_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_eager_noexcept_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_cpu",
+    "test/dynamo/test_backends.py::TestOptimizationsCPU::test_example_inputs_runtime_use_cpu"
+  ],
+  "test_files": [
+    "test/dynamo/test_backends.py"
+  ],
+  "fix_files": [
+    "torch/_dynamo/backends/tvm.py"
+  ],
+  "created_at": "2026-07-06T06:58:14Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

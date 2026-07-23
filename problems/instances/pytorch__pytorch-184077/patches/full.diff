@@ -1,0 +1,152 @@
+diff --git a/test/dynamo/test_after_aot.py b/test/dynamo/test_after_aot.py
+index 7ac9eb7f19b2e..3919778ebb6b9 100644
+--- a/test/dynamo/test_after_aot.py
++++ b/test/dynamo/test_after_aot.py
+@@ -7,6 +7,7 @@
+ import sys
+ import tempfile
+ import unittest
++from types import SimpleNamespace
+ from unittest.mock import patch
+ 
+ import torch._dynamo.test_case
+@@ -15,6 +16,7 @@
+     _get_compile_args,
+     InputReader,
+     InputWriter,
++    repro_minify,
+     save_graph_repro,
+ )
+ from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
+@@ -116,6 +118,41 @@ def fake_compile_fx_inner(restored_symint):
+             self.assertIsInstance(restored, torch.SymInt)
+             self.assertTrue(restored.node.expr.has(ModularIndexing))
+ 
++    def test_repro_minify_disables_repro_after(self):
++        seen_repro_after = object()
++
++        def fake_repro_common(options, mod, load_args):
++            def f(x):
++                return (x,)
++
++            args = [torch.randn(1)]
++            return make_fx(f)(*args), args
++
++        def fake_minifier(*args, **kwargs):
++            nonlocal seen_repro_after
++            seen_repro_after = torch._dynamo.config.repro_after
++
++        options = SimpleNamespace(
++            accuracy="accuracy",
++            check_str=None,
++            isolate=False,
++            save_dir=None,
++            tracing_mode="real",
++            offload_to_disk=False,
++            skip_saving_eager_intermediates=False,
++            skip_sanity=False,
++            max_granularity=None,
++        )
++
++        with (
++            torch._dynamo.config.patch(repro_after="aot"),
++            patch("torch._dynamo.repro.after_aot.repro_common", fake_repro_common),
++            patch("functorch.compile.minifier", fake_minifier),
++        ):
++            repro_minify(options, torch.nn.Identity(), lambda reader: None)
++
++        self.assertIsNone(seen_repro_after)
++
+     @unittest.skipIf(IS_FBCODE, "NotImplementedError")
+     def test_save_graph_repro(self):
+         # TODO: This triggers CUDA context initialization, even though
+diff --git a/test/dynamo/test_debug_utils.py b/test/dynamo/test_debug_utils.py
+index 2e650c7567b16..7360f495f7811 100644
+--- a/test/dynamo/test_debug_utils.py
++++ b/test/dynamo/test_debug_utils.py
+@@ -68,6 +68,8 @@ def forward(self, x_1):
+             "TEST_ENV": "1",
+             "TORCHINDUCTOR_ENV_SINGLE_QUOTES": "inductor_'env'",
+             "TORCHINDUCTOR_ENV_DOUBLE_QUOTES": 'inductor_"env"',
++            "TORCHDYNAMO_REPRO_AFTER": "aot",
++            "TORCHDYNAMO_REPRO_LEVEL": "4",
+         },
+     )
+     def test_generate_env_vars_string(self):
+@@ -97,6 +99,10 @@ def test_generate_env_vars_string(self):
+ """,
+             env_strings,
+         )
++        self.assertNotIn("os.environ['TORCHDYNAMO_REPRO_AFTER']", env_strings)
++        self.assertNotIn("os.environ['TORCHDYNAMO_REPRO_LEVEL']", env_strings)
++        self.assertIn("os.environ.pop('TORCHDYNAMO_REPRO_AFTER', None)", env_strings)
++        self.assertIn("os.environ.pop('TORCHDYNAMO_REPRO_LEVEL', None)", env_strings)
+ 
+ 
+ class TestDebugUtilsDevice(TestCase):
+diff --git a/torch/_dynamo/debug_utils.py b/torch/_dynamo/debug_utils.py
+index d9fcceb981cc8..a912a2dbf8b97 100644
+--- a/torch/_dynamo/debug_utils.py
++++ b/torch/_dynamo/debug_utils.py
+@@ -297,15 +297,22 @@ def generate_env_vars_string(*, stable_output: bool = False) -> str:
+ 
+     allow_list = ["TORCH", "DYNAMO", "INDUCTOR", "TRITON"]
+     skip_list = ["TRITON_LIBDEVICE_PATH", "TRITON_PTXAS_PATH", "TRITON_LIBCUDA_PATH"]
++    repro_env_vars = ["TORCHDYNAMO_REPRO_AFTER", "TORCHDYNAMO_REPRO_LEVEL"]
+ 
+     def filter(key: str) -> bool:
+-        return any(string in key for string in allow_list) and key not in skip_list
++        return (
++            any(string in key for string in allow_list)
++            and key not in skip_list
++            and key not in repro_env_vars
++        )
+ 
+     config_lines = [
+         f"""os.environ['{key}'] = '{value.replace("'", '"')}'"""
+         for key, value in os.environ.items()
+         if filter(key)
+     ]
++    # Repro scripts should not recursively generate more repro scripts when run.
++    config_lines.extend(f"os.environ.pop('{key}', None)" for key in repro_env_vars)
+     config_string = "\n".join(config_lines)
+     return normalize_path_separator(f"""\
+ import os
+diff --git a/torch/_dynamo/repro/after_aot.py b/torch/_dynamo/repro/after_aot.py
+index 8242416de7ab6..aa8adf74a6ddb 100644
+--- a/torch/_dynamo/repro/after_aot.py
++++ b/torch/_dynamo/repro/after_aot.py
+@@ -1258,19 +1258,20 @@ def repro_minify(options: Any, mod: nn.Module, load_args: Any) -> None:
+     else:
+         module_fails = ACCURACY_FAILS[options.accuracy]
+ 
+-    minifier(
+-        mod,
+-        args,
+-        module_fails=functools.partial(module_fails, check_str=options.check_str),
+-        dump_state=functools.partial(
+-            dump_compiler_graph_state, compiler_name=compiler_name
+-        ),
+-        save_dir=options.save_dir,
+-        offload_to_disk=options.offload_to_disk,
+-        skip_offload=options.skip_saving_eager_intermediates,
+-        skip_sanity=options.skip_sanity,
+-        max_granularity=options.max_granularity,
+-    )
++    with config.patch(repro_after=None):
++        minifier(
++            mod,
++            args,
++            module_fails=functools.partial(module_fails, check_str=options.check_str),
++            dump_state=functools.partial(
++                dump_compiler_graph_state, compiler_name=compiler_name
++            ),
++            save_dir=options.save_dir,
++            offload_to_disk=options.offload_to_disk,
++            skip_offload=options.skip_saving_eager_intermediates,
++            skip_sanity=options.skip_sanity,
++            max_granularity=options.max_granularity,
++        )
+ 
+ 
+ def repro_analyze(options: Any, mod: nn.Module, load_args: Any) -> None:

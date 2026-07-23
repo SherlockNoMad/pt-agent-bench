@@ -1,0 +1,49 @@
+{
+  "instance_id": "pytorch__pytorch-187190",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "180657"
+  ],
+  "pull_number": 187190,
+  "base_commit": "400c87d6d990552df82c53b988f506be64c2094e",
+  "problem_statement": "BUG: Avoid NumPy 2 deprecation warning in `__array_wrap__`\n\n### \ud83d\udc1b Describe the bug\n\nIn NumPy 2, NumPy added a `DeprecationWarning` on `__array_wrap__` to extend the information passed in and avoid an indefinite `try/except` chain.\n\nThis means that the e.g. the following gives a warning:\n```\nimport warnings\n\nimport numpy as np\nimport torch\n\nwarnings.filterwarnings(\"error\")  # with this an error\n\nnp.delete(torch.arange(10), 0)\n```\n\nNow, the solution is straight forward: Just add the two new arguments and ignore them.\n(torch has no scalars, and the context is info that was always there and you don't need).  That is `__array_wrap__(obj, context=None, return_scalar=None)`.\n\nI'll guess end-users use this path but because of how `DeprecationWarning`s work they won't actually see them normally, so it makes sense it wasn't spotted.\nIt would be nice to escalate the warning to something visible, but I would prefer if by that time torch has the fix.\n\n### Versions\n\ncurrent main.\n\ncc @mruberry @rgommers",
+  "patch": "diff --git a/torch/_tensor.py b/torch/_tensor.py\nindex ffd43a7873287..a29df464c0bc3 100644\n--- a/torch/_tensor.py\n+++ b/torch/_tensor.py\n@@ -1253,7 +1253,10 @@ def __array__(self, dtype=None):\n \n     # Wrap Numpy array again in a suitable tensor when done, to support e.g.\n     # `numpy.sin(tensor) -> tensor` or `numpy.greater(tensor, 0) -> ByteTensor`\n-    def __array_wrap__(self, array):\n+    # NumPy 2 passes `context` and `return_scalar`; torch has no scalars and\n+    # does not need the context, so both are accepted and ignored. Declaring\n+    # them avoids a NumPy 2 DeprecationWarning about the old call signature.\n+    def __array_wrap__(self, array, context=None, return_scalar=False):\n         if has_torch_function_unary(self):\n             return handle_torch_function(\n                 Tensor.__array_wrap__, (self,), self, array=array\ndiff --git a/torch/overrides.py b/torch/overrides.py\nindex b6f0afa5b1b6c..ae648db5a67cc 100644\n--- a/torch/overrides.py\n+++ b/torch/overrides.py\n@@ -1341,7 +1341,7 @@ def get_testing_overrides() -> dict[Callable, Callable]:\n         Tensor.__mod__: lambda self, other: -1,\n         Tensor.__rmod__: lambda self, other: -1,\n         Tensor.__imod__: lambda self, other: -1,\n-        Tensor.__array_wrap__: lambda self, array: -1,\n+        Tensor.__array_wrap__: lambda self, array, context=None, return_scalar=False: -1,\n         Tensor.__getitem__: lambda self, idx: -1,\n         Tensor.__deepcopy__: lambda self, memo: -1,\n         Tensor.__int__: lambda self: -1,\n",
+  "test_patch": "diff --git a/test/test_numpy_interop.py b/test/test_numpy_interop.py\nindex e737dbfa246cc..b66da5ea1381c 100644\n--- a/test/test_numpy_interop.py\n+++ b/test/test_numpy_interop.py\n@@ -3,6 +3,7 @@\n # Owner(s): [\"module: numpy\"]\n \n import sys\n+import warnings\n from itertools import product\n from unittest import skipIf\n \n@@ -485,6 +486,22 @@ def test_numpy_array_interface(self, device):\n             for i in range(len(x)):\n                 self.assertEqual(geq2_x[i], geq2_array[i])\n \n+    @onlyCPU\n+    def test_array_wrap_no_deprecation_warning(self, device):\n+        # NumPy 2 calls __array_wrap__ with extra `context` and\n+        # `return_scalar` arguments and emits a DeprecationWarning when they\n+        # are not accepted. See https://github.com/pytorch/pytorch/issues/180657\n+        x = torch.arange(10)\n+        with warnings.catch_warnings():\n+            warnings.simplefilter(\"error\", DeprecationWarning)\n+            # np.delete dispatches through __array_wrap__ on the result.\n+            result = np.delete(x, 0)\n+        self.assertIsInstance(result, torch.Tensor)\n+        self.assertEqual(result, torch.arange(1, 10))\n+        # Calling directly with the NumPy 2 signature must also be accepted.\n+        wrapped = x.__array_wrap__(np.arange(10), None, False)\n+        self.assertIsInstance(wrapped, torch.Tensor)\n+\n     @onlyCPU\n     def test_multiplication_numpy_scalar(self, device) -> None:\n         for np_dtype in [\n",
+  "FAIL_TO_PASS": [
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_array_wrap_no_deprecation_warning_cpu"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_bool",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_complex128",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_complex64",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_float16",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_float32",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_float64",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_int16",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_int32",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_int64",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_int8",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test___eq___cpu_uint8",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_copy_mode_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_ctor_with_invalid_numpy_array_sequence_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_ctor_with_numpy_scalar_ctor_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_empty_tensors_interop_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_from_list_of_ndarray_warning_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_from_numpy_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_from_numpy_no_leak_on_invalid_dtype_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_from_numpy_zero_element_type_cpu",
+    "test/test_numpy_interop.py::TestNumPyInteropCPU::test_has_storage_numpy_cpu"
+  ],
+  "test_files": [
+    "test/test_numpy_interop.py"
+  ],
+  "fix_files": [
+    "torch/_tensor.py",
+    "torch/overrides.py"
+  ],
+  "created_at": "2026-07-08T05:15:52Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

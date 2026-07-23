@@ -1,0 +1,48 @@
+{
+  "instance_id": "pytorch__pytorch-185360",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "159660"
+  ],
+  "pull_number": 185360,
+  "base_commit": "9daea44bdc57157271c05212fc761d39f74d667f",
+  "problem_statement": "x.new_empty() doesn't preserve the stride of x, but we're using it everywhere for meta implementation\n\n### \ud83d\udc1b Describe the bug\n\nAs title, we should use `torch.empty_like(x)` instead of `x.new_empty` for meta implementation to preserve the stride. But currently we're using `torch.empty_like(x)`  everywhere in `_meta_registrations`. \n\nAlso, it's really easy for users to make the mistake of using `torch.empty_like(x)`. I've encountered at least one user who used `torch.empty_like(x)`, and doesn't know why the meta implementation is failing with numerical issues.\n\n\n```\nx = torch.rand(23, 3).t()\n\nprint(x.stride())\n# (1, 3)\n\nx.new_empty(x.size()).stride()\n# (23, 1)\n\ntorch.empty_like(x).stride()\n# (1, 3)\n```\n\ncc @chauhang @penguinwu @eellison @zou3519 @bdhirsh \n\n### Versions\n\nnightly",
+  "patch": "diff --git a/torch/_meta_registrations.py b/torch/_meta_registrations.py\nindex 600ca23fab904..cd747a212ecef 100644\n--- a/torch/_meta_registrations.py\n+++ b/torch/_meta_registrations.py\n@@ -4723,7 +4723,7 @@ def meta_lshifts(self, other):\n \n @register_meta(aten.zero.default)\n def meta_zero(self):\n-    return self.new_empty(self.shape)\n+    return torch.empty_like(self)\n \n \n @register_meta([aten.fill_.Tensor, aten.fill_.Scalar])\n",
+  "test_patch": "diff --git a/test/test_meta.py b/test/test_meta.py\nindex cbf6064c87fae..e8708868f79da 100644\n--- a/test/test_meta.py\n+++ b/test/test_meta.py\n@@ -2007,6 +2007,24 @@ def test_linalg_eig_strides_cpu(self):\n         self.assertEqual(eigvecs.shape, eigvecs_fake.shape)\n         self.assertEqual(eigvecs.dtype, eigvecs_fake.dtype)\n \n+    @skipIfTorchDynamo(\"tests raw meta kernel, not dynamo\")\n+    def test_zero_preserves_input_strides(self):\n+        from torch._subclasses.fake_tensor import FakeTensorMode\n+\n+        x = torch.randn(5, 4).t()\n+        cpu_result = torch.ops.aten.zero.default(x)\n+\n+        meta_x = torch.empty_strided(x.shape, x.stride(), device=\"meta\")\n+        meta_result = torch.ops.aten.zero.default(meta_x)\n+        self.assertEqual(cpu_result.shape, meta_result.shape)\n+        self.assertEqual(cpu_result.stride(), meta_result.stride())\n+\n+        with FakeTensorMode() as mode:\n+            fake_x = mode.from_tensor(x)\n+            fake_result = torch.ops.aten.zero.default(fake_x)\n+        self.assertEqual(cpu_result.shape, fake_result.shape)\n+        self.assertEqual(cpu_result.stride(), fake_result.stride())\n+\n     @skipIfTorchDynamo(\"tests raw meta kernel, not dynamo\")\n     def test_randint_like_tensor_dtype_kwarg(self):\n         x_cpu = torch.randn(3, 4)\n",
+  "FAIL_TO_PASS": [
+    "test/test_meta.py::TestMetaKernelRegistrations::test_zero_preserves_input_strides"
+  ],
+  "PASS_TO_PASS": [
+    "test/test_meta.py::TestMetaConverter::test_channels_last",
+    "test/test_meta.py::TestMetaConverter::test_channels_last_leaf",
+    "test/test_meta.py::TestMetaConverter::test_channels_last_non_leaf",
+    "test/test_meta.py::TestMetaConverter::test_complex_noncontiguous_bug",
+    "test/test_meta.py::TestMetaConverter::test_empty_strided_non_dense_leaf",
+    "test/test_meta.py::TestMetaConverter::test_imag",
+    "test/test_meta.py::TestMetaConverter::test_inplace_set_storage",
+    "test/test_meta.py::TestMetaConverter::test_leaf",
+    "test/test_meta.py::TestMetaConverter::test_non_leaf",
+    "test/test_meta.py::TestMetaConverter::test_non_leaf_torture",
+    "test/test_meta.py::TestMetaConverter::test_requires_grad_false",
+    "test/test_meta.py::TestMetaConverter::test_tensor_outlives_converter",
+    "test/test_meta.py::TestMetaConverter::test_view_as_complex",
+    "test/test_meta.py::TestMetaConverter::test_view_as_real",
+    "test/test_meta.py::TestMetaConverter::test_view_dtype",
+    "test/test_meta.py::TestMetaConverter::test_view_mutate",
+    "test/test_meta.py::TestMetaConverter::test_view_of_leaf",
+    "test/test_meta.py::TestMetaConverter::test_view_of_non_leaf",
+    "test/test_meta.py::TestMetaConverter::test_view_of_view_of_leaf",
+    "test/test_meta.py::TestMetaConverter::test_weakref"
+  ],
+  "test_files": [
+    "test/test_meta.py"
+  ],
+  "fix_files": [
+    "torch/_meta_registrations.py"
+  ],
+  "created_at": "2026-06-05T18:01:21Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}

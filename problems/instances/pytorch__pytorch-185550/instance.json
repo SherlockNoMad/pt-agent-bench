@@ -1,0 +1,47 @@
+{
+  "instance_id": "pytorch__pytorch-185550",
+  "repo": "pytorch/pytorch",
+  "issue_numbers": [
+    "153852"
+  ],
+  "pull_number": 185550,
+  "base_commit": "9183299236b498a69e999def9667a4c477c112fe",
+  "problem_statement": "[BUG] repr of complex tensors loses negative zero in imaginary part inside torch.compile\n\n### \ud83d\udc1b Describe the bug\n\nReproducer:\n\n```python\nimport torch\n\ndef f(x):\n    x = torch.tensor([1e28 + 2j , -1e-28j])\n    return x.cos(), str(x)\n\nx = torch.tensor([1e28 + 2j , -1e-28j])\nprint(f(x))  # (tensor([1.-0.j]), 'tensor([-0.-1.0000e-28j])')\nprint(torch.compile(f, fullgraph=False, backend=\"eager\")(x))  # (tensor([1.+0.j]), 'tensor([0.-1.0000e-28j])')\n```\n\n### Versions\n\nPytorch main branch\n\ncc @ezyang @anjali411 @dylanbespalko @mruberry @nikitaved @amjames @chauhang @penguinwu @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @chenyang78 @kadeng",
+  "patch": "diff --git a/torch/fx/graph.py b/torch/fx/graph.py\nindex d076f3061675b..28b5f93b258ef 100644\n--- a/torch/fx/graph.py\n+++ b/torch/fx/graph.py\n@@ -616,6 +616,12 @@ def _get_repr(arg: object) -> str:\n                 cls = arg.__class__\n                 clsname = add_global(cls.__name__, cls)\n                 return f\"{clsname}.{arg.name}\"\n+            elif isinstance(arg, complex):\n+                if arg.real == 0.0 or arg.imag == 0.0:\n+                    # complex.__repr__ is not a safe source representation for\n+                    # signed zero components, e.g. eval(\"(-0-1j)\") loses the sign.\n+                    return f\"complex({_get_repr(arg.real)}, {_get_repr(arg.imag)})\"\n+                return blue(repr(arg))\n             elif isinstance(arg, torch.Tensor):\n                 size = list(arg.size())\n                 dtype = str(arg.dtype).split(\".\")[-1]\n",
+  "test_patch": "diff --git a/test/dynamo/test_repros.py b/test/dynamo/test_repros.py\nindex 1ac83250adc9a..2ff7d23092183 100644\n--- a/test/dynamo/test_repros.py\n+++ b/test/dynamo/test_repros.py\n@@ -6167,6 +6167,21 @@ def f(x):\n         torch.view_as_real(out_test).sum().backward()\n         self.assertEqual(x_ref.grad, x_test.grad)\n \n+    def test_compile_complex_tensor_constant_signed_zero(self):\n+        def f(x):\n+            y = torch.tensor([1e28 + 2j, -1e-28j])\n+            return y.cos(), str(y)\n+\n+        x = torch.tensor([1e28 + 2j, -1e-28j])\n+        expected_cos, expected_str = f(x)\n+        actual_cos, actual_str = torch.compile(f, backend=\"eager\")(x)\n+\n+        self.assertEqual(actual_cos, expected_cos)\n+        self.assertEqual(\n+            torch.signbit(actual_cos.imag), torch.signbit(expected_cos.imag)\n+        )\n+        self.assertEqual(actual_str, expected_str)\n+\n     @unittest.skipIf(\n         not SM70OrLater,\n         \"Triton only supports devices of CUDA capability >= 7.0\",\ndiff --git a/test/test_fx.py b/test/test_fx.py\nindex b14147f0a7acc..92582a92159b6 100644\n--- a/test/test_fx.py\n+++ b/test/test_fx.py\n@@ -2463,6 +2463,29 @@ def test_empty_graph_codegen(self):\n         gm = torch.fx.GraphModule(torch.nn.Module(), graph)\n         self.assertEqual(gm(), None)\n \n+    def test_complex_constant_codegen_preserves_signed_zero(self):\n+        values = [\n+            complex(-0.0, -1e-28),\n+            complex(-0.0, 1e-28),\n+            complex(0.0, -1e-28),\n+            complex(1.0, -0.0),\n+            complex(0.0, -0.0),\n+        ]\n+\n+        graph = torch.fx.Graph()\n+        tensor = graph.call_function(\n+            torch.tensor, args=(values,), kwargs={\"dtype\": torch.complex64}\n+        )\n+        graph.output(tensor)\n+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)\n+\n+        expected = torch.tensor(values, dtype=torch.complex64)\n+        result = gm()\n+        self.assertEqual(result, expected)\n+        self.assertEqual(torch.signbit(result.real), torch.signbit(expected.real))\n+        self.assertEqual(torch.signbit(result.imag), torch.signbit(expected.imag))\n+        self.assertIn(\"complex(-0.0, -1e-28)\", gm.code)\n+\n     def test_sequential(self):\n         m = torch.nn.Sequential(torch.nn.Conv2d(1, 1, 1))\n         gm = torch.fx.symbolic_trace(m)\n",
+  "FAIL_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_compile_complex_tensor_constant_signed_zero"
+  ],
+  "PASS_TO_PASS": [
+    "test/dynamo/test_repros.py::ReproTests::test_312_local_cell_overlap",
+    "test/dynamo/test_repros.py::ReproTests::test_Size",
+    "test/dynamo/test_repros.py::ReproTests::test_abc_setattr",
+    "test/dynamo/test_repros.py::ReproTests::test_add_sub_alpha_out",
+    "test/dynamo/test_repros.py::ReproTests::test_addr_alpha_beta_out",
+    "test/dynamo/test_repros.py::ReproTests::test_amp_foreach_fake_impl",
+    "test/dynamo/test_repros.py::ReproTests::test_aot_autograd_runtime_wrapper_prologue_profiled",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_base_with_mutation_works",
+    "test/dynamo/test_repros.py::ReproTests::test_as_strided_on_existing_view_banned",
+    "test/dynamo/test_repros.py::ReproTests::test_attached_attribute_in_dir",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_ctx_stash_no_vc_check",
+    "test/dynamo/test_repros.py::ReproTests::test_autograd_function_graph_break",
+    "test/dynamo/test_repros.py::ReproTests::test_avoid_dupe_specialization",
+    "test/dynamo/test_repros.py::ReproTests::test_basic_tensor_subclass_constructor",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_encoding_clone_inputs",
+    "test/dynamo/test_repros.py::ReproTests::test_batch_norm_act",
+    "test/dynamo/test_repros.py::ReproTests::test_batchnorm_e2e",
+    "test/dynamo/test_repros.py::ReproTests::test_bigbird_unsqueeze_inplace"
+  ],
+  "test_files": [
+    "test/dynamo/test_repros.py",
+    "test/test_fx.py"
+  ],
+  "fix_files": [
+    "torch/fx/graph.py"
+  ],
+  "created_at": "2026-06-13T01:55:14Z",
+  "version": "era-8fabe0e",
+  "quality": {
+    "f2p_asserts_message_string": false
+  }
+}
