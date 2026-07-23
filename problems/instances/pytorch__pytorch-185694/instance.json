@@ -29,5 +29,24 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "actionable",
+    "bot-triaged",
+    "module: library",
+    "module: pt2-dispatcher",
+    "module: typing",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2026-05-29T19:32:34Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-31T22:06:56Z",
+  "resolution_days": 2.1,
+  "hints_text": "[N0AHZACH \u00b7 2026-05-31]\ncan I take a crack at this ? I kinda feel like I got a solution",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/185659",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185694",
+  "f2p_count": 1,
+  "p2p_count": 5,
+  "patch_size_loc": 14
 }

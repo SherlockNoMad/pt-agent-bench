@@ -45,5 +45,22 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-triaged",
+    "module: dynamo",
+    "module: error checking",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2026-05-15T13:37:40Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-22T18:17:10Z",
+  "resolution_days": 7.2,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/183900",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/183915",
+  "f2p_count": 2,
+  "p2p_count": 20,
+  "patch_size_loc": 4
 }

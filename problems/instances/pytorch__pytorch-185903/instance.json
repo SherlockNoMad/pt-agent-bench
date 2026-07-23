@@ -38,5 +38,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: dynamo",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-03-25T00:33:19Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-02T07:26:51Z",
+  "resolution_days": 434.3,
+  "hints_text": "[bdhirsh \u00b7 2025-03-25]\nWe could theoretically support inplace metadata mutation if it is important enough (we temporarily did support `set_` for FSDP). It is a pain though. It would probably be easier just to upstream a fix replacing this code with `y = y.transpose(1, 2)` (we could probably even have the graph break message suggest the fix): https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py#L50",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/149907",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185903",
+  "f2p_count": 1,
+  "p2p_count": 13,
+  "patch_size_loc": 18
 }

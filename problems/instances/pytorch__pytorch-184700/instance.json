@@ -38,5 +38,24 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-triaged",
+    "module: aotdispatch",
+    "module: crash",
+    "module: higher order operators",
+    "module: pt2-dispatcher",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2026-03-26T17:30:12Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-11T07:30:56Z",
+  "resolution_days": 76.6,
+  "hints_text": "[okiemute04 \u00b7 2026-03-26]\n@tugsbayasgalan  I've been looking at the `invoke_subgraph` code and the error at line 663 in `torch/_higher_order_ops/invoke_subgraph.py` where the `fake_mode` assertion fails.  From my understanding, the issue occurs when using `backend=eager` because AOTAutograd isn't invoked to set up the fake_mode. The backward pass expects fake_mode to be present, but with eager backend it's None. I'm thinking of a few potential approaches:\n1. Conditionally skip the fake_mode check for eager backend\n2. Create a minimal fake_mode for eager backend cases\n3. Modify the backward to work without fake_mode when not needed.\nI wanted to check:\n- Is there a specific reason why `invoke_subgraph` requires fake_mode for eager backend?\n- Would it be acceptable to skip this check when not in AOTAutograd mode?\n- Are there other HOPs that handle this pattern that we should look at for reference?",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/178520",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/184700",
+  "f2p_count": 1,
+  "p2p_count": 14,
+  "patch_size_loc": 9
 }

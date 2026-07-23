@@ -37,5 +37,24 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-triaged",
+    "module: edge cases",
+    "module: empty tensor",
+    "module: fakeTensor",
+    "module: pt2-dispatcher",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2026-04-24T23:21:45Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-04-29T00:31:42Z",
+  "resolution_days": 4.0,
+  "hints_text": "[dadakhan033050-debug \u00b7 2026-04-25]\nimport torch\nfrom torch._subclasses.fake_tensor import FakeTensorMode\n\n# Real tensor works\nx = torch.empty(0)\nprint(torch.split(x, 2))\n# Expected/actual: (tensor([]),)\n\n# FakeTensor crashes\nwith FakeTensorMode():\n  fx = torch.empty(0)\n  print(torch.split(fx, 2))\n# Raises IndexError\n\n[senekis316 \u00b7 2026-04-25]\nHi! I've submitted a PR to fix this: https://github.com/pytorch/pytorch/pull/181493\n\nThe root cause is in `torch/_decomp/decompositions.py` \u2014 when `dim_size == 0` and `split_size > 0`, `chunks` evaluates to 0, producing an empty list, and `split_sizes[-1]` then raises `IndexError`. Fix is to return early when `dim_size == 0`.\n\n[geurinmccuan345-maker \u00b7 2026-04-25]\n\u0641\u064a \u0627\u0644\u0633\u0628\u062a\u060c 25 \u0623\u0628\u0631\u064a\u0644 2026 17:30 senekis ***@***.***> \u0643\u062a\u0628:\r\n\r\n> *senekis316* left a comment (pytorch/pytorch#181462)\r\n> <https://github.com/pytorch/pytorch/issues/181462#issuecomment-4320064527>\r\n>\r\n> Hi! I've submitted a PR to fix this: #181493\r\n> <https://github.com/pytorch/pytorch/pull/181493>\r\n>\r\n> The root cause is in torch/_decomp/decompositions.py \u2014 when dim_size == 0\r\n> and split_size > 0, chunks evaluates to 0, producing an empty list, and\r\n> split_sizes[-1] then raises IndexError. Fix is to return early when dim_size\r\n> == 0.\r\n>\r\n> \u2014\r\n> Reply to this email directly, view it on GitHub\r\n> <https://github.com/pytorch/pytorch/issues/181462#issuecomment-4320064527>,\r\n> or unsubscribe\r\n> <https://github.com/notifications/unsubscribe-auth/CBUSR6G7C7NRE4BH5EZZWST4XTR23AVCNFSM6AAAAACYFYSLZCVHI2DSMVQWIX3LMV43OSLTON2WKQ3PNVWWK3TUHM2DGMRQGA3DINJSG4>\r\n> .\r\n> Triage notifications, keep track of coding agent tasks and review pull\r\n> requests on the go with GitHub Mobile for iOS\r\n> <https://github.com/notifications/mobile/ios/CBUSR6EUOBMLRVRKRZCPFVD4XTR23A5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTIMZSGAYDMNBVGI32M4TFMFZW63VKON2WE43DOJUWEZLEUVSXMZLOOSVGM33PORSXEX3JN5ZQ>\r\n> and Android\r\n> <https://github.com/notifications/mobile/android/CBUSR6DE7QBIIMFWHEZVA3D4XTR23A5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTIMZSGAYDMNBVGI32M4TFMFZW63VKON2WE43DOJUWEZLEUVSXMZLOOSXGM33PORSXEX3BNZSHE33JMQ>.\r\n> Download it today!\r\n> You are receiving this because you are subscribed to this thread.Message\r\n> ID: ***@***.***>\r\n>\n\n[geurinmccuan345-maker \u00b7 2026-04-25]\nThanks for reporting this issue. I\u2019ll review the behavior and get back with\r\nmore details shortly\r\n\r\n\r\n\u0641\u064a \u0627\u0644\u0633\u0628\u062a\u060c 25 \u0623\u0628\u0631\u064a\u0644 2026 23:41 Geurin Mccuan ***@***.***> \u0643\u062a\u0628:\r\n\r\n>\r\n> \u0641\u064a \u0627\u0644\u0633\u0628\u062a\u060c 25 \u0623\u0628\u0631\u064a\u0644 2026 17:30 senekis ***@***.***> \u0643\u062a\u0628:\r\n>\r\n>> *senekis316* left a comment (pytorch/pytorch#181462)\r\n>> <https://github.com/pytorch/pytorch/issues/181462#issuecomment-4320064527>\r\n>>\r\n>> Hi! I've submitted a PR to fix this: #181493\r\n>> <https://github.com/pytorch/pytorch/pull/181493>\r\n>>\r\n>> The root cause is in torch/_decomp/decompositions.py \u2014 when dim_size == 0\r\n>> and split_size > 0, chunks evaluates to 0, producing an empty list, and\r\n>> split_sizes[-1] then raises IndexError. Fix is to return early when dim_size\r\n>> == 0.\r\n>>\r\n>> \u2014\r\n>> Reply to this email directly, view it on GitHub\r\n>> <https://github.com/pytorch/pytorch/issues/181462#issuecomment-4320064527>,\r\n>> or unsubscribe\r\n>> <https://github.com/notifications/unsubscribe-auth/CBUSR6G7C7NRE4BH5EZZWST4XTR23AVCNFSM6AAAAACYFYSLZCVHI2DSMVQWIX3LMV43OSLTON2WKQ3PNVWWK3TUHM2DGMRQGA3DINJSG4>\r\n>> .\r\n>> Triage notifications, keep track of coding agent tasks and review pull\r\n>> requests on the go with GitHub Mobile for iOS\r\n>> <https://github.com/notifications/mobile/ios/CBUSR6EUOBMLRVRKRZCPFVD4XTR23A5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTIMZSGAYDMNBVGI32M4TFMFZW63VKON2WE43DOJUWEZLEUVSXMZLOOSVGM33PORSXEX3JN5ZQ>\r\n>> and Android\r\n>> <https://github.com/notifications/mobile/android/CBUSR6DE7QBIIMFWHEZVA3D4XTR23A5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTIMZSGAYDMNBVGI32M4TFMFZW63VKON2WE43DOJUWEZLEUVSXMZLOOSXGM33PORSXEX3BNZSHE33JMQ>.\r\n>> Download it today!\r\n>> You are receiving this because you are subscribed to this thread.Message\r\n>> ID: ***@***.***>\r\n>>\r\n>",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/181462",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/181493",
+  "f2p_count": 2,
+  "p2p_count": 12,
+  "patch_size_loc": 8
 }

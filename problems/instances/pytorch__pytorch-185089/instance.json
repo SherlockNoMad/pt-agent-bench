@@ -42,5 +42,21 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: memory format",
+    "module: regression",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-10-03T06:45:59Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-25T00:22:32Z",
+  "resolution_days": 233.7,
+  "hints_text": "[ezyang \u00b7 2025-10-06]\nIMO this should work\n\n[mieshkiwrk \u00b7 2025-10-07]\nFYI behavior changed due to this: [PR#156643](https://github.com/pytorch/pytorch/pull/156643 )\n\n[ezyang \u00b7 2025-10-08]\ncc @StrongerXi",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/164555",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185089",
+  "f2p_count": 1,
+  "p2p_count": 18,
+  "patch_size_loc": 27
 }

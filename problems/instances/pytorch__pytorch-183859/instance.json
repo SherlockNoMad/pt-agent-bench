@@ -42,5 +42,22 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "module: aotdispatch",
+    "module: fakeTensor",
+    "module: pt2-dispatcher",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2024-12-22T08:55:26Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-17T16:35:50Z",
+  "resolution_days": 511.3,
+  "hints_text": "[xmfan \u00b7 2025-01-07]\ncorresponding fused kernel, intermediates are in float32\r\n```python\r\n@triton.jit\r\ndef triton_poi_fused__to_copy_div_0(in_ptr0, in_ptr1, out_ptr1, xnumel, XBLOCK : tl.constexpr):\r\n    xnumel = 1\r\n    xoffset = tl.program_id(0) * XBLOCK\r\n    xindex = xoffset + tl.arange(0, XBLOCK)[:]\r\n    xmask = tl.full([XBLOCK], True, tl.int1)\r\n    tmp0 = tl.load(in_ptr0 + (0))\r\n    tmp1 = tl.broadcast_to(tmp0, [XBLOCK])\r\n    tmp3 = tl.load(in_ptr1 + (0))\r\n    tmp4 = tl.broadcast_to(tmp3, [XBLOCK])\r\n    tmp2 = tmp1.to(tl.float32)  # intermediates in fp32\r\n    tmp5 = tmp4.to(tl.float32)  # intermediates in fp32\r\n    tmp6 = tmp2 / tmp5\r\n    tmp7 = tmp6.to(tl.int64)\r\n    tl.store(out_ptr1 + (tl.full([XBLOCK], 0, tl.int32)), tmp7, None)\r\n```\n\n[eellison \u00b7 2025-01-07]\nThis is an AOT Eager error / Fake Tensor checking error, which is responsible for checking dtype errors like this. You can use CompilerBisector to bisect this, which is in the oncall runbook. cc @shaoyuyoung if you can include that in the repro that would be helpful as well.\r\n\r\n```\r\nimport torch\r\nimport torch.nn as nn\r\n\r\nclass Model(nn.Module):\r\n    def __init__(self):\r\n        super(Model, self).__init__()\r\n\r\n    def forward(self, x, y):\r\n        x.div_(y)\r\n        return x\r\n\r\n\r\nx = torch.tensor([1])\r\ny = torch.tensor([0])\r\n\r\ninputs = [x, y]\r\n\r\n\r\ndef run_test(inputs, device, mode):\r\n    model = Model()\r\n    if mode == \"inductor\":\r\n        model = torch.compile(model)\r\n\r\n    if device == \"cuda\":\r\n        inputs = [x.cuda() for x in inputs]\r\n        model = model.cuda()\r\n\r\n    def test_fn():\r\n        torch._dynamo.reset()\r\n        try:\r\n            output = model(*inputs)\r\n            return False\r\n        except Exception as e:\r\n            return True\r\n    \r\n    from torch._inductor.compiler_bisector import CompilerBisector\r\n    print(CompilerBisector.do_bisect(test_fn))\r\n\r\nrun_test(inputs, \"cuda\", \"inductor\")\r\n```\r\n\r\n> BisectionResult(backend='eager', subsystem=None, bisect_number=None, debug_info=None)\r\n\r\nIt fails even with \"eager\" backend.\n\n[xmfan \u00b7 2025-01-07]\n@eellison the \"result type Float can't be cast to the desired output type Long\" error is actually the expected behavior, because it matches eager semantics. It looks like backend=\"aot_eager\" is where it starts to return bad results.\n\n[shaoyuyoung \u00b7 2025-02-05]\n> It looks like backend=\"aot_eager\" is where it starts to return bad results.\n\nThat's true. I have updated the repro\n\n[aorenste \u00b7 2026-05-15]\nStill reproduces on PyTorch 2.13.0.dev20260510+cpu.\n\nMinimized (dropped the `nn.Module` wrapper and `torch.nn` import \u2014 the bug only needs `torch.compile` + an in-place `.div_` with an integer-zero divisor):\n\n```python\nimport torch\n\n\ndef f(x, y):\n    x.div_(y)\n    return x\n\n\ncompiled = torch.compile(f, backend=\"aot_eager\")\n\ntry:\n    compiled(torch.tensor([1]), torch.tensor([0]))\nexcept RuntimeError as e:\n    if \"result type Float can't be cast to the desired output type Long\" in str(e):\n        pass\n    else:\n        raise\nelse:\n    raise AssertionError(\"BUG: aot_eager .div_ with zero int divisor silently succeeded instead of raising dtype cast error\")\n```\n\nThe bug reproduces on CPU with the `aot_eager` backend. Eager mode correctly raises `RuntimeError: result type Float can't be cast to the desired output type Long`, but compiling with `aot_eager` makes the in-place divide on an int tensor by an int-zero tensor silently succeed instead of raising \u2014 divergence from eager semantics for an in-place op with mismatched dtypes.\n\n_(Analysis done by Claude.)_",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/143717",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/183859",
+  "f2p_count": 1,
+  "p2p_count": 18,
+  "patch_size_loc": 22
 }

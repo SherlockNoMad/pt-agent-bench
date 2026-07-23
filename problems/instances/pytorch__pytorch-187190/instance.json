@@ -45,5 +45,23 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-mislabeled",
+    "bot-triaged",
+    "enhancement",
+    "module: deprecation",
+    "module: numpy",
+    "triaged"
+  ],
+  "issue_created_at": "2026-04-17T07:27:16Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-07-08T05:15:52Z",
+  "resolution_days": 81.9,
+  "hints_text": "[ogulcanaydogan \u00b7 2026-04-28]\nI'd like to work on this. The fix is straightforward: update `__array_wrap__` in `torch/_tensor.py` to accept `context=None, return_scalar=None` and ignore them, suppressing the NumPy 2 deprecation warning.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/180657",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/187190",
+  "f2p_count": 1,
+  "p2p_count": 20,
+  "patch_size_loc": 7
 }

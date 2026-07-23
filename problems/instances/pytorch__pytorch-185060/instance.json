@@ -41,5 +41,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "module: dynamo",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-10-30T15:32:49Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-08T07:34:16Z",
+  "resolution_days": 220.7,
+  "hints_text": "[adam10cole \u00b7 2025-11-05]\nHey everyone, \n\nI\u2019m a student in EECS481, a software engineering course at the University of Michigan where we have to contribute to an open source project, and I\u2019m interested in working on this issue (#166644) over the next few weeks. \n\nHere's my initial plan:\n\n1. Reproduce the bug locally (today)\n2. Dive into the TorchDynamo/FakeTensor device propagation code to locate where cpu/meta mixture is mishandled\n3. Add a small fix so that embedding operations with mixed devices either compile correctly or graph break in a consistent way with eager behavior\n4. Add some unit tests covering the cpu/meta mix for embedding \n\nI don't see any other contributors currently working on this, but please let me know if anyone else is otherwise trying to fix this issue.\n\nThanks, and also anyone let me know if there are any specific files, functions, existing tests, etc you'd recommend I take a look at (or any prior PRs to reference)\n\n[Blooming-Tree \u00b7 2025-11-07]\n\n\n\n> Hey everyone,\n> \n> I\u2019m a student in EECS481, a software engineering course at the University of Michigan where we have to contribute to an open source project, and I\u2019m interested in working on this issue ([#166644](https://github.com/pytorch/pytorch/issues/166644)) over the next few weeks.\n> \n> Here's my initial plan:\n> \n> 1. Reproduce the bug locally (today)\n> 2. Dive into the TorchDynamo/FakeTensor device propagation code to locate where cpu/meta mixture is mishandled\n> 3. Add a small fix so that embedding operations with mixed devices either compile correctly or graph break in a consistent way with eager behavior\n> 4. Add some unit tests covering the cpu/meta mix for embedding\n> \n> I don't see any other contributors currently working on this, but please let me know if anyone else is otherwise trying to fix this issue.\n> \n> Thanks, and also anyone let me know if there are any specific files, functions, existing tests, etc you'd recommend I take a look at (or any prior PRs to reference)\n\nThanks for your interest in contributing to this issue! \n\nIt's great to see you're taking initiative on this bug. Your plan sounds solid, and I appreciate you checking if anyone else is already working on it.\n\nAnd welcome any suggestions and guidance from the community in the comments!\n\nLooking forward to seeing your progress on this fix. Good luck with your EECS481 project!",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/166644",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185060",
+  "f2p_count": 3,
+  "p2p_count": 15,
+  "patch_size_loc": 22
 }

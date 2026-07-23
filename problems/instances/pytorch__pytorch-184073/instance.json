@@ -47,5 +47,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: inductor",
+    "oncall: cpu inductor",
+    "oncall: pt2"
+  ],
+  "issue_created_at": "2025-06-27T09:01:57Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-19T13:08:27Z",
+  "resolution_days": 326.2,
+  "hints_text": "[zxd1997066 \u00b7 2025-07-01]\nHi @williamwen42, could you please help take a look? As the suspected guilty commit is https://github.com/pytorch/pytorch/commit/24dc33b37b50ec92da08fc693dd83e7c87b74f8b\n\n[williamwen42 \u00b7 2025-07-01]\nThis PR adds a little bit of eval_frame overhead, so small tests may regress.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/157077",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/184073",
+  "f2p_count": 3,
+  "p2p_count": 20,
+  "patch_size_loc": 19
 }

@@ -45,5 +45,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: dynamic shapes",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-10-01T18:13:31Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-26T07:15:52Z",
+  "resolution_days": 236.5,
+  "hints_text": "[isuruf \u00b7 2025-10-09]\nThe vendored in version of Max, Min in pytorch does not do simplifications for performance reasons\n\ncc @ezyang\n\n[ezyang \u00b7 2025-10-15]\nIt's probably OK to try to knock out some simple simplifications, but yes, perf here matters.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/164375",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185092",
+  "f2p_count": 1,
+  "p2p_count": 20,
+  "patch_size_loc": 34
 }

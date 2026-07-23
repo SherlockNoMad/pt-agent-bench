@@ -40,5 +40,24 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "empathy-day",
+    "module: dynamic shapes",
+    "module: dynamo",
+    "module: vllm",
+    "oncall: pt2",
+    "triaged",
+    "vllm-compile"
+  ],
+  "issue_created_at": "2025-08-21T00:10:12Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-05T20:31:38Z",
+  "resolution_days": 288.8,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/161119",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185280",
+  "f2p_count": 1,
+  "p2p_count": 16,
+  "patch_size_loc": 38
 }

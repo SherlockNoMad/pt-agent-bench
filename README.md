@@ -45,10 +45,17 @@ pt-agent-bench/
 
 ```json
 {"instance_id", "repo", "base_commit", "problem_statement",
- "patch", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS", "version"}
+ "patch", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS", "version",
+ // metadata (SWE-bench-compatible extras; harness ignores unknown keys)
+ "issue_labels", "issue_created_at", "fix_commit_at", "resolution_days",
+ "hints_text", "issue_url", "pr_url", "issue_numbers", "pull_number",
+ "fix_files", "test_files", "f2p_count", "p2p_count", "patch_size_loc"}
 ```
 The model sees only `repo`@`base_commit` + `problem_statement`. `patch`/`test_patch` are the
-withheld gold solution + grading tests.
+withheld gold solution + grading tests. `hints_text` is the issue conversation **before the
+fix** (leakage-safe context; not fed to the solver by default). `issue_labels` enable category
+analysis; `issue_created_at`/`fix_commit_at`/`resolution_days` enable time-trend analysis.
+Regenerate metadata with `collect/enrich_instances.py`.
 
 ## Quickstart
 

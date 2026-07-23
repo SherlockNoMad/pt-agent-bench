@@ -44,5 +44,24 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "PT2-Bug-Bash",
+    "high priority",
+    "module: cpp-extensions",
+    "module: custom-operators",
+    "module: library",
+    "module: pt2-dispatcher",
+    "triaged"
+  ],
+  "issue_created_at": "2025-03-19T01:32:23Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-08T23:19:03Z",
+  "resolution_days": 415.9,
+  "hints_text": "[zou3519 \u00b7 2025-03-19]\nBug is that we only enable stride checking on CUDA tensors, for legacy reasons: https://github.com/pytorch/pytorch/blob/6bcf9c6ce349eeba4eeec19b40d6644b9ca7df2d/torch/_prims_common/__init__.py#L230\n\nWe should enable stride checking on all tensors via opcheck. This is BC-breaking, but it is worth the break.\n\n[malfet \u00b7 2025-03-31]\n@zou3519 would you be so kind, to please add labels to the issues you file? (It's really hard to make a judgement by just `high pri` label on whether or not problem is really a high pri)\n\n[zou3519 \u00b7 2025-04-01]\n> [@zou3519](https://github.com/zou3519) would you be so kind, to please add labels to the issues you file? (It's really hard to make a judgement by just `high pri` label on whether or not problem is really a high pri)\n\nYes, will do\n\n[aorenste \u00b7 2026-03-08]\nThis issue still reproduces on PyTorch 2.12.0a0 (nightly).\n\nMinimized repro (no torchvision/PIL dependency):\n\n```python\nimport torch\n\n@torch.library.custom_op(\"mylib2::mismatched_strides\", mutates_args=())\ndef mismatched_strides(x: torch.Tensor) -> torch.Tensor:\n    return x.clone().permute(2, 0, 1)\n\n@mismatched_strides.register_fake\ndef _(x):\n    c, h, w = x.shape[2], x.shape[0], x.shape[1]\n    return x.new_empty(c, h, w)\n\nx = torch.randn(4, 4, 3)  # CPU tensor\nresult = torch.library.opcheck(mismatched_strides, (x,))\nprint(result)\n# BUG: all tests pass on CPU despite stride mismatch.\n# On CUDA, test_faketensor correctly fails with \"Stride mismatch!\"\n```\n\n(Analysis done by Claude.)",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/149468",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/183002",
+  "f2p_count": 1,
+  "p2p_count": 20,
+  "patch_size_loc": 2
 }

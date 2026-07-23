@@ -42,5 +42,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "module: dynamo",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-09-08T09:01:52Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-05T22:23:54Z",
+  "resolution_days": 270.6,
+  "hints_text": "[jbschlosser \u00b7 2025-09-08]\nAs mentioned in #162375, it's currently expected that the `pack_padded_sequence()` / `pad_packed_sequence()` APIs are not supported with torch.compile. For this specific issue, the error is less nice since a graph break happens but doesn't completely sidestep the issue. I'll let the oncall weigh in here but a simple workaround would avoid using these APIs.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/162374",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185143",
+  "f2p_count": 1,
+  "p2p_count": 18,
+  "patch_size_loc": 2
 }

@@ -30,5 +30,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: higher order operators",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-07-09T02:23:18Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-02T17:42:32Z",
+  "resolution_days": 328.6,
+  "hints_text": "[zou3519 \u00b7 2025-07-09]\nseems reasonable",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/157888",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185439",
+  "f2p_count": 2,
+  "p2p_count": 4,
+  "patch_size_loc": 63
 }

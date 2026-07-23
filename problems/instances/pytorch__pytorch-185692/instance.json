@@ -47,5 +47,19 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-04-17T01:22:16Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-07T23:04:54Z",
+  "resolution_days": 416.9,
+  "hints_text": "[laithsakka \u00b7 2025-04-17]\nanother example\n```\n# another bug omg!!debug it rsa is not filtered as intended.\ntorch._dynamo.config.capture_scalar_outputs = True\n\n@torch.compile(fullgraph=True)\ndef func2(a, b):\n    torch._check(b.item() == 5.5)\n    return a * 10\nwith fresh_inductor_cache():\n    func2(torch.tensor([5]), torch.tensor([5.5]))\n        # func2(torch.tensor([100]), torch.tensor([1.5]))\n```\n\n[laithsakka \u00b7 2025-04-17]\nI have fixes for the above two now hitting a 3rd bug for \n```\n        @torch.compile(fullgraph=True)\n        def func3(a, b):\n            torch._check(operator.or_(a.item() == 5, b.item() == 5))\n            return a.item() * 10\n\n        func3(torch.tensor([5.1]), torch.tensor([100]))\n        func3(torch.tensor([100]), torch.tensor([5.1]))\n        with self.assertRaises(RuntimeError):\n            func3(torch.tensor([100]), torch.tensor([5.2]))\n```",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/151500",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185692",
+  "f2p_count": 3,
+  "p2p_count": 20,
+  "patch_size_loc": 36
 }

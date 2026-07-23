@@ -26,5 +26,22 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: dynamo",
+    "module: logging",
+    "oncall: pt2",
+    "topic: not user facing",
+    "triaged"
+  ],
+  "issue_created_at": "2026-01-29T03:08:38Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-01T04:47:09Z",
+  "resolution_days": 123.1,
+  "hints_text": "[pytorch-bot[bot] \u00b7 2026-01-29]\nDidn't find following labels among repository labels: release notes: logging\n\n[lliinnkkkk \u00b7 2026-01-29]\n@pytorchbot label \"topic: not user facing\"\n\n[williamwen42 \u00b7 2026-02-20]\nDo you have a strong reason to extend TORCH_LOGS over using Python's `logging` mechanism? TORCH_LOGS is just a bunch of utilities on top of Python `logging` and is primarily intended for logging internal mechanisms.\n\ncc @mlazos for opinions\n\n[lliinnkkkk \u00b7 2026-02-24]\n> Do you have a strong reason to extend TORCH_LOGS over using Python's `logging` mechanism? TORCH_LOGS is just a bunch of utilities on top of Python `logging` and is primarily intended for logging internal mechanisms.\n> \n> cc [@mlazos](https://github.com/mlazos) for opinions\n\nA 3rd-party backend based on privateuse1 can be considered as an out-of-tree PyTorch device backend implementation. If the existing logging mechanism can be reused for internal logging, it would avoid redundant efforts from the community. From a user's perspective, there would be no need to reconfigure an additional LOGGER environment variable.\n\n[mlazos \u00b7 2026-02-24]\n@williamwen42  @lliinnkkkk I'm fine with moving initialization after the backends import.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/173759",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/184919",
+  "f2p_count": 1,
+  "p2p_count": 2,
+  "patch_size_loc": 19
 }

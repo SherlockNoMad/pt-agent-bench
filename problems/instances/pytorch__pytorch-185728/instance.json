@@ -44,5 +44,19 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "oncall: export",
+    "oncall: pt2"
+  ],
+  "issue_created_at": "2025-04-01T16:58:58Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-07-02T17:49:57Z",
+  "resolution_days": 457.0,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/150428",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185728",
+  "f2p_count": 1,
+  "p2p_count": 20,
+  "patch_size_loc": 64
 }

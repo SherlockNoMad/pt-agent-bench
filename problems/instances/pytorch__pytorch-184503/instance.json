@@ -42,5 +42,22 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-triaged",
+    "module: dynamo",
+    "module: regression",
+    "oncall: pt2",
+    "triage review"
+  ],
+  "issue_created_at": "2026-05-18T20:50:35Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-21T13:13:49Z",
+  "resolution_days": 2.7,
+  "hints_text": "[sebsv123 \u00b7 2026-05-19]\nGood repro. The root cause is in Dynamo's codegen for augmented assignment (`&=`) when the LHS is a Python `bool` literal that has been constant-folded.\n\n**What's happening:**\n\nWhen `has_bias = c is not None` is traced with `c=0.0` on the first call, Dynamo constant-folds `has_bias` to `False` (a Python bool literal). The cache guard stores this specialization.\n\nOn the second call with `c=0.5`, Dynamo re-traces because `c` is now a non-zero float. At this point `has_bias = c is not None` evaluates to `True` (Python bool), and when Dynamo emits the codegen for `has_bias &= c != 0.0`, it incorrectly substitutes the constant-folded value `True` as the LHS of the augmented assignment \u2014 producing `True &= ne` which is syntactically invalid Python.\n\nThe stack trace confirms the issue: `SyntaxError: 'True' is an illegal expression for augmented assignment` is raised inside `fx.GraphModule.recompile()` \u2192 `_exec_with_source()`, meaning the generated Python source is syntactically broken before any execution even happens.\n\n**Root cause:**\n\nThe bug is in how Dynamo's output graph handles variables that were constant-folded on a prior trace when re-emitting code for a new guard-mismatched trace. Instead of allocating a fresh local variable for `has_bias` in the new trace, it reuses the string representation of the prior guard value (`True`), leading to `True &= ...` in the emitted source.\n\nThe fix should be in the codegen path for `IAND` (in-place AND) / augmented assignment opcodes in `symbolic_convert.py` \u2014 specifically ensuring that when a variable's current value is a `ConstantVariable` wrapping a Python bool, the codegen allocates a fresh SSA name rather than inlining the constant as the assignment target.\n\n**Minimal isolated trigger:**\n\nThe bug only reproduces when **both** calls are made in sequence because:\n1. First call: `c=0.0` \u2192 `has_bias` is constant-folded to `False`, Dynamo skips the `&=` entirely (short-circuits).\n2. Second call: `c=0.5` \u2192 `has_bias = True` needs the `&=`, but Dynamo incorrectly emits `True &= ne` from the cached constant.\n\n**Workaround until fixed:**\n\n```python\n# Avoid augmented assignment on bool derived from is-not-None check.\n# Instead, use a single explicit boolean expression:\nhas_bias = (c is not None) and (c != 0.0)\n```\n\nThis avoids the `IAND` opcode entirely and compiles correctly across all call patterns.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/184272",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/184503",
+  "f2p_count": 1,
+  "p2p_count": 18,
+  "patch_size_loc": 4
 }

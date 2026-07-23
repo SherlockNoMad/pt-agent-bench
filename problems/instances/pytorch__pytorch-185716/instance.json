@@ -46,5 +46,19 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "oncall: export",
+    "oncall: pt2"
+  ],
+  "issue_created_at": "2025-04-14T04:29:34Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-04T14:18:00Z",
+  "resolution_days": 416.4,
+  "hints_text": "[angelayi \u00b7 2025-04-14]\nIt seems like the additional dimension is due to [this line](https://github.com/pytorch/pytorch/blob/eb19f5abab4a8295421a08a2417d1a51bff51521/torch/_decomp/decompositions.py#L3418). If we change it to `squeeze(0)` then it matches the eager output. I'm not exactly sure how to test this though, so will take a closer look.\n\n[ali-nrn \u00b7 2026-03-19]\nWe're hitting the same root cause, with an additional downstream impact: when the LSTM `h_n` output is used in `torch.where` alongside `seq_out[-1]`, the extra singleton dimension causes a **shape mismatch between the exported graph's FakeTensor annotations and actual runtime output**.\n\nSpecifically, for `nn.LSTM(num_layers=1, batch_first=False)`:\n\n- `seq_out[-1]` has FakeTensor shape `[batch, hidden]` (2D) \n- `h_n[0]` has FakeTensor shape `[1, batch, hidden]` (3D) \u2014 due to this bug\n- `torch.where(cond, seq_out[-1], h_n[0])` broadcasts to `[1, batch, hidden]` (3D) in the graph\n- But at runtime, the result is `[batch, hidden]` (2D)\n\nThis breaks downstream consumers (e.g., torch-mlir) that rely on the exported graph's type annotations \u2014 they faithfully follow the declared 3D shape and produce incorrect output shapes.\n\nMinimal repro showing the FakeTensor vs runtime disagreement:\n\n```python\nimport torch\nimport torch.nn as nn\nfrom torch.export import export, Dim\n\nclass MinimalModel(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.rnn = nn.LSTM(input_size=24, hidden_size=32, num_layers=1, batch_first=False)\n\n    def forward(self, x):\n        seq_out, (h_n, c_n) = self.rnn(x)\n        cond = torch.tensor(True)\n        y = torch.where(cond, seq_out[-1], h_n[0])\n        return y\n\nmodel = MinimalModel()\nmodel.eval()\nx = torch.randn(6, 2, 24)\n\nwith torch.no_grad():\n    ep = export(model, (x,), dynamic_shapes={\"x\": {1: Dim(\"batch\")}})\n\nfor node in ep.graph.nodes:\n    if 'where' in str(node.target):\n        val = node.meta.get('val')\n        print(f\"FakeTensor shape: {val.shape}\")  # [1, s27, 32] \u2014 3D (wrong)\n\nwith torch.no_grad():\n    out = ep.module()(torch.randn(6, 4, 24))\n    print(f\"Runtime shape:    {out.shape}\")      # [4, 32] \u2014 2D (correct)\n```\n\nOutput:\n```\nFakeTensor shape: torch.Size([1, s27, 32])\nRuntime shape:    torch.Size([4, 32])\n```\n\nTested on PyTorch 2.8.0+cpu.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/151200",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185716",
+  "f2p_count": 2,
+  "p2p_count": 20,
+  "patch_size_loc": 5
 }

@@ -43,5 +43,21 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: windows",
+    "oncall: cpu inductor",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-07-02T15:12:05Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-04T19:32:31Z",
+  "resolution_days": 337.2,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/157458",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185447",
+  "f2p_count": 1,
+  "p2p_count": 18,
+  "patch_size_loc": 17
 }

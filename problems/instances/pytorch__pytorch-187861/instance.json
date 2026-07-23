@@ -111,5 +111,22 @@
     "test/nn/test_pooling.py::TestPoolingNNDeviceTypeCPU::test_pooling_zero_stride_cpu"
   ],
   "created_at": "2026-06-19T21:05:47Z",
-  "version": "main@2025-11"
+  "version": "main@2025-11",
+  "issue_labels": [
+    "bot-triaged",
+    "enhancement",
+    "module: error checking",
+    "module: pooling",
+    "triaged"
+  ],
+  "issue_created_at": "2026-06-19T21:05:47Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-19T21:05:47Z",
+  "resolution_days": 0.0,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/187743",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/187861",
+  "f2p_count": 1,
+  "p2p_count": 96,
+  "patch_size_loc": 8
 }

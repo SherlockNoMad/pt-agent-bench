@@ -40,5 +40,23 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-triaged",
+    "enhancement",
+    "module: fakeTensor",
+    "module: pt2-dispatcher",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2026-05-15T02:48:55Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-10T15:15:35Z",
+  "resolution_days": 26.5,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/183835",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/183839",
+  "f2p_count": 2,
+  "p2p_count": 15,
+  "patch_size_loc": 10
 }

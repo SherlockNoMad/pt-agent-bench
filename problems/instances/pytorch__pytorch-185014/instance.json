@@ -43,5 +43,19 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "oncall: export",
+    "oncall: pt2"
+  ],
+  "issue_created_at": "2025-11-22T20:55:23Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-23T05:35:16Z",
+  "resolution_days": 212.4,
+  "hints_text": "[zhxchen17 \u00b7 2025-11-24]\ncc @angelayi\n\n[angelayi \u00b7 2025-11-24]\nAre you loading the model with fake tensors or meta tensors?\n\n[himalayjor \u00b7 2025-11-24]\n> Are you loading the model with fake tensors or meta tensors?\n\nThere is no fake tensors or meta tensors.\n\n```\nmodel = torch.load(checkpoint, map_location=\"cuda\")\n```\n\n[himalayjor \u00b7 2025-11-26]\n@angelayi  @zhxchen17  any updates ?",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/168908",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185014",
+  "f2p_count": 1,
+  "p2p_count": 18,
+  "patch_size_loc": 101
 }

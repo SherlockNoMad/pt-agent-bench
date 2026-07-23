@@ -41,5 +41,20 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: dynamic shapes",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2025-10-11T02:45:33Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-27T07:31:31Z",
+  "resolution_days": 228.2,
+  "hints_text": "[parsshar-RH \u00b7 2025-10-15]\nI am working on this issue\n\n[bdhirsh \u00b7 2025-10-19]\n`torch._convolution` is a private API - is there any reason you are using it over `torch.convolution`?\n\n[tinywisdom \u00b7 2025-10-21]\n@bdhirsh I came across it accidentally while checking how convolution was handled internally. I understand it\u2019s a private API, but since the bug manifested there, I thought it might help to share a minimal repro.",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/165210",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/185081",
+  "f2p_count": 2,
+  "p2p_count": 15,
+  "patch_size_loc": 53
 }

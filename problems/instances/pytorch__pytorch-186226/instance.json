@@ -51,5 +51,24 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": true
-  }
+  },
+  "issue_labels": [
+    "better-engineering",
+    "internal ramp-up task",
+    "module: autograd",
+    "module: custom-operators",
+    "module: pt2-dispatcher",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2024-10-02T20:58:38Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-06-10T11:21:37Z",
+  "resolution_days": 615.6,
+  "hints_text": "[zou3519 \u00b7 2025-04-11]\nRepro:\n```py\nimport torch\n\n@torch.library.custom_op(\"mylib::foo\", mutates_args=())\ndef foo(x: torch.Tensor) -> torch.Tensor:\n    return x.sin()\n\ndef setup_context(ctx, inputs, output):\n    x, = inputs\n    ctx.save_for_backward(x)\n\ndef backward(ctx, grad_output):\n    x, = ctx.saved_tensors\n    return ()\n\nfoo.register_autograd(backward, setup_context=setup_context)\n\nx = torch.randn(3, requires_grad=True)\ny = foo(x)\ny.sum().backward()\n```\nEasiest thing to do is to emit our own error before autograd gets to emit its error",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/137219",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/186226",
+  "f2p_count": 8,
+  "p2p_count": 20,
+  "patch_size_loc": 40
 }

@@ -45,5 +45,23 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "bot-triaged",
+    "dynamo-triage-dec2025",
+    "module: dynamo",
+    "oncall: pt2",
+    "tensor subclass",
+    "triaged"
+  ],
+  "issue_created_at": "2026-04-20T12:20:39Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-05-11T16:05:08Z",
+  "resolution_days": 21.2,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/180840",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/182241",
+  "f2p_count": 1,
+  "p2p_count": 20,
+  "patch_size_loc": 13
 }

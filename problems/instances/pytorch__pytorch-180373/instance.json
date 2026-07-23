@@ -43,5 +43,21 @@
   "version": "era-8fabe0e",
   "quality": {
     "f2p_asserts_message_string": false
-  }
+  },
+  "issue_labels": [
+    "module: dynamo",
+    "module: graph breaks",
+    "oncall: pt2",
+    "triaged"
+  ],
+  "issue_created_at": "2026-04-02T22:31:24Z",
+  "pr_merged_at": null,
+  "fix_commit_at": "2026-04-30T14:30:18Z",
+  "resolution_days": 27.7,
+  "hints_text": "",
+  "issue_url": "https://github.com/pytorch/pytorch/issues/179194",
+  "pr_url": "https://github.com/pytorch/pytorch/pull/180373",
+  "f2p_count": 2,
+  "p2p_count": 18,
+  "patch_size_loc": 29
 }
