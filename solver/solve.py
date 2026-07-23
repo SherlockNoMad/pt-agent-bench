@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Solve each collected task with a blind `claude -p` agent, then grade it.
+"""Solve each collected task with a blind, pluggable agent backend, then grade it.
 
-Per task: checkout base_commit -> build -> reset blind -> claude solves (sees only
-problem_statement + repo) -> capture model_patch -> apply model_patch+gold test_patch
+Per task: checkout base_commit -> build -> reset blind -> strip git history -> BACKEND solves
+(sees only problem_statement + repo) -> capture model_patch -> apply model_patch+gold test_patch
 -> run FAIL_TO_PASS/PASS_TO_PASS -> resolved. Appends to solve_results.jsonl.
 
-Usage: nohup python3 solve_and_grade.py <nworkers> [limit] > solve.log 2>&1 &
+Backend is pluggable (see solver/backends.py): claude-code (default), codex, + optional private overlay.
+Usage: nohup python3 solve.py <nworkers> [limit] [--backend=NAME] > solve.log 2>&1 &
+       (or PTAB_BACKEND=codex ...)
 """
 import subprocess, json, re, os, sys, time, shutil, multiprocessing as mp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # so `import backends` works
+import config, backends
 
 ROOT=config.WORKSPACE
 SRC=config.SRC; BASE_ENV=config.BASE_ENV
@@ -17,9 +20,9 @@ INST=config.INSTANCES
 DATASET=config.DATASET
 SOLVE_RESULTS=config.SOLVE_RESULTS
 SCLAIMS=config.SOLVE_CLAIMS
-LOGS=config.LOGS            # worker + per-task claude logs (workspace, gitignored)
+LOGS=config.LOGS            # worker logs (workspace, gitignored)
 TRACES=config.TRACES        # full solver transcripts (committed for audit)
-CLAUDE=config.CLAUDE
+BACKEND=os.environ.get("PTAB_BACKEND","claude-code")   # pluggable: claude-code | codex | ... (see backends.py)
 for _d in (SCLAIMS,LOGS,TRACES,config.WORKSPACE): os.makedirs(_d,exist_ok=True)
 BUILD_TIMEOUT=2400; SOLVE_TIMEOUT=1800
 GENV={k:v for k,v in os.environ.items() if k!="LD_LIBRARY_PATH"}
@@ -124,42 +127,14 @@ def solve(wid,wt,env,outdir,inst):
     with open(pf,"w") as f: f.write(inst["problem_statement"])
     assert os.path.getsize(pf)>0, "empty problem_statement"
     prompt=SOLVE_PROMPT.format(env=env)
-    ev=dict(GENV)  # clean env: claude is fbcode-linked and crashes if /usr/lib64 is on LD_LIBRARY_PATH
-    clog=open(os.path.join(LOGS,f"{inst['instance_id']}.claude.log"),"w")
-    meta={}
-    # LOCKDOWN (verified): --bare removes plugins/MCP/skills/hooks; --permission-mode default
-    # (NOT bypass — bypass ignores allow/deny) + allowlist => only local file tools. No web/MCP/Agent/Skill.
-    ALLOWED="Read Edit Write Grep Glob Bash".split()
-    _strip_history(wt)   # hide the future fix commit from the solver
+    trace_path=os.path.join(TRACES,f"{inst['instance_id']}.trace.jsonl")
+    backend_fn=backends.get_backend(BACKEND)
+    _strip_history(wt)   # hide the future fix commit from the solver (backend-agnostic)
     try:
-        r=subprocess.run([CLAUDE,"-p",prompt,"--bare","--permission-mode","default",
-                          "--model","claude-opus-4-8","--effort","xhigh",
-                          "--output-format","json","--allowedTools",*ALLOWED],
-                         cwd=wt,env=ev,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=SOLVE_TIMEOUT)
-        clog.write("RC=%s\n---STDOUT---\n%s\n---STDERR---\n%s"%(r.returncode,r.stdout[-6000:],r.stderr[-2000:]))
-        try:
-            j=json.loads(r.stdout); u=j.get("usage",{}) or {}
-            sid=j.get("session_id")
-            meta={"session_id":sid,"cost_usd":j.get("total_cost_usd"),"claude_ms":j.get("duration_ms"),
-                  "claude_api_ms":j.get("duration_api_ms"),"num_turns":j.get("num_turns"),
-                  "in_tok":u.get("input_tokens"),"out_tok":u.get("output_tokens"),
-                  "cache_read_tok":u.get("cache_read_input_tokens"),
-                  "cache_create_tok":u.get("cache_creation_input_tokens"),
-                  "claude_error":j.get("is_error"),"stop_reason":j.get("stop_reason")}
-            # preserve the full trace next to the result
-            if sid:
-                # claude stores transcripts under ~/.claude/projects/<abs-cwd-with-slashes-as-dashes>/
-                proj=os.path.expanduser("~/.claude/projects/"+os.path.abspath(wt).replace("/","-"))
-                src=os.path.join(proj,f"{sid}.jsonl")
-                if os.path.exists(src):
-                    shutil.copy(src,os.path.join(TRACES,f"{inst['instance_id']}.trace.jsonl"))
-        except Exception:
-            meta={"claude_parse_error":True}
-    except subprocess.TimeoutExpired:
-        clog.write("TIMEOUT"); meta={"claude_timeout":True}
+        # backend runs the agent in wt (blind), edits files, writes its trace, returns meta
+        meta=backend_fn(wt, env, prompt, SOLVE_TIMEOUT, trace_path)
     finally:
         _restore_history(wt)   # bring back real .git (HEAD detached at base_commit) for grading
-    clog.close()
     os.remove(pf)
     git(wt,"add","-N",".")
     d=git(wt,"diff","--","." ,":(exclude)test/*",":(exclude)PROBLEM.txt",":(exclude)agent_space/*")
@@ -211,9 +186,9 @@ def worker(wid,tasks,jobs):
             mp,meta=solve(wid,wt,env,None,inst); t_solve=round(time.monotonic()-ts,1)
             tg=time.monotonic()
             g=grade(wt,env,inst,mp); t_grade=round(time.monotonic()-tg,1)
-            g.update(instance_id=iid,model="claude-opus-4-8-xhigh-blind",patch_bytes=len(mp),
+            g.update(instance_id=iid,patch_bytes=len(mp),
                      t_build_s=t_build,t_solve_s=t_solve,t_grade_s=t_grade,
-                     t_e2e_s=round(time.monotonic()-t0,1),**meta)
+                     t_e2e_s=round(time.monotonic()-t0,1),**meta)   # meta carries backend+model
             record(g)
             n=sum(1 for l in open(SOLVE_RESULTS) if json.loads(l).get("resolved"))
             log(wid,f"{iid} resolved={g['resolved']} ({g.get('f2p_pass')}/{g.get('f2p_total')} F2P) "
@@ -222,6 +197,8 @@ def worker(wid,tasks,jobs):
             record({"instance_id":iid,"resolved":False,"reason":f"exc:{type(e).__name__}:{str(e)[:120]}"}); log(wid,f"{iid} EXC {e}")
 
 def main(nworkers=4, limit=None):
+    backends.get_backend(BACKEND)   # validate early
+    print(f"== backend: {BACKEND}  |  available: {sorted(backends.REGISTRY)} ==",flush=True)
     tasks=[json.loads(l) for l in open(DATASET) if l.strip()]
     # need F2P from inst/<id>/instance.json (dataset has it too)
     tasks=[t for t in tasks if t.get("FAIL_TO_PASS")]
@@ -244,6 +221,10 @@ def main(nworkers=4, limit=None):
     print("DONE")
 
 if __name__=="__main__":
-    nw=int(sys.argv[1]) if len(sys.argv)>1 else 4
-    lim=int(sys.argv[2]) if len(sys.argv)>2 else None
+    # usage: solve.py [nworkers] [limit] [--backend=NAME]   (or PTAB_BACKEND env)
+    pos=[a for a in sys.argv[1:] if not a.startswith("--")]
+    for a in sys.argv[1:]:
+        if a.startswith("--backend="): BACKEND=a.split("=",1)[1]
+    nw=int(pos[0]) if len(pos)>0 else 4
+    lim=int(pos[1]) if len(pos)>1 else None
     main(nw,lim)

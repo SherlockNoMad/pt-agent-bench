@@ -63,8 +63,9 @@ Regenerate metadata with `collect/enrich_instances.py`.
 # 1. Build the workspace (pytorch clone + conda env; ~one CPU-only build). Needs conda + gh.
 bash setup_workspace.sh
 
-# 2. Solve all tasks with a blind agent, then grade (6 parallel workers). Requires `claude` CLI.
-python3 solver/solve.py 6
+# 2. Solve all tasks with a blind agent, then grade (6 parallel workers).
+python3 solver/solve.py 6                      # default backend: claude-code
+python3 solver/solve.py 6 --backend=codex      # or: PTAB_BACKEND=codex python3 solver/solve.py 6
 
 # 3. Inspect
 python3 results/metrics.py            # pass rate, cost, time, cost/min
@@ -73,6 +74,20 @@ python3 grader/audit_traces.py        # reward-hacking audit of saved solver tra
 # Grade a single prediction file:  python3 grader/grade.py problems/instances/<id>/instance.json preds.jsonl
 ```
 Prediction format is SWE-bench-compatible: `{"instance_id", "model_name_or_path", "model_patch"}`.
+
+## Pluggable solver backends
+
+The solver is provider-agnostic — a backend just runs a coding agent in a prepared (blind)
+worktree and returns cost/time/token metadata; patch capture, grading, and the git-history
+strip are backend-agnostic. Select with `--backend=NAME` or `PTAB_BACKEND`.
+
+| Backend | CLI | Notes |
+|---|---|---|
+| `claude-code` | `claude` | default; `--bare` + tool allowlist. `PTAB_CLAUDE_MODEL`/`PTAB_CLAUDE_EFFORT`. |
+| `codex` | `codex exec` | `workspace-write` sandbox (no network). `PTAB_CODEX_MODEL`. |
+
+Add a backend by registering a `run(wt, env, prompt, timeout, trace_path) -> meta` function in
+`solver/backends.py`. Provider endpoints/models come from env — no hardcoded internal config.
 
 ## Anti-reward-hacking (why the numbers are trustworthy)
 

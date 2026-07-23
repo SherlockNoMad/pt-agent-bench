@@ -16,3 +16,6 @@ __pycache__/
 
 # solver transcripts may contain local paths — not published
 /results/traces/
+
+# Private/local solver backends overlay — not published
+/solver/backends_internal.py
