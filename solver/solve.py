@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Solve each collected task with a blind, pluggable agent backend, then grade it.
+"""Solve each collected task with blind, pluggable agent backends, then grade each.
 
-Per task: checkout base_commit -> build -> reset blind -> strip git history -> BACKEND solves
-(sees only problem_statement + repo) -> capture model_patch -> apply model_patch+gold test_patch
--> run FAIL_TO_PASS/PASS_TO_PASS -> resolved. Appends to solve_results.jsonl.
+Per task the env is built ONCE and then fanned out across every selected backend, so the
+(expensive) PyTorch build is amortized across backends:
+  checkout base_commit -> build -> for each BACKEND: {reset blind -> strip git history ->
+  backend solves (sees only problem_statement + repo) -> capture model_patch ->
+  apply model_patch+gold test_patch -> run FAIL_TO_PASS/PASS_TO_PASS -> resolved}.
+Each (instance_id, backend) is one row in solve_results.jsonl; each backend's transcript is
+saved to TRACES/<iid>__<backend>.trace.jsonl for audit.
 
-Backend is pluggable (see solver/backends.py): claude-code (default), codex, + optional private overlay.
-Usage: nohup python3 solve.py <nworkers> [limit] [--backend=NAME] > solve.log 2>&1 &
-       (or PTAB_BACKEND=codex ...)
+Backends are pluggable (see solver/backends.py) + an optional private overlay.
+Usage: nohup python3 solve.py <nworkers> [limit] [--backends=a,b,c] [--ids=id1,id2] > solve.log 2>&1 &
+       (or PTAB_BACKENDS=claude-code,codex ...)
 """
 import subprocess, json, re, os, sys, time, shutil, multiprocessing as mp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,8 +25,9 @@ DATASET=config.DATASET
 SOLVE_RESULTS=config.SOLVE_RESULTS
 SCLAIMS=config.SOLVE_CLAIMS
 LOGS=config.LOGS            # worker logs (workspace, gitignored)
-TRACES=config.TRACES        # full solver transcripts (committed for audit)
-BACKEND=os.environ.get("PTAB_BACKEND","claude-code")   # pluggable: claude-code | codex | ... (see backends.py)
+TRACES=config.TRACES        # full solver transcripts (per backend), for audit
+# One or more backends to fan out over (build once, solve+grade each). Comma-separated.
+BACKENDS=[b for b in os.environ.get("PTAB_BACKENDS",os.environ.get("PTAB_BACKEND","claude-code")).split(",") if b]
 for _d in (SCLAIMS,LOGS,TRACES,config.WORKSPACE): os.makedirs(_d,exist_ok=True)
 BUILD_TIMEOUT=2400; SOLVE_TIMEOUT=1800
 GENV={k:v for k,v in os.environ.items() if k!="LD_LIBRARY_PATH"}
@@ -31,16 +36,31 @@ def log(wid,m):
     line=f"[{time.strftime('%H:%M:%S')}][s{wid}] {m}"; print(line,flush=True)
     open(os.path.join(LOGS,f"s{wid}.log"),"a").write(line+"\n")
 def git(wt,*a,timeout=1200): return subprocess.run(["git","-C",wt,*a],env=GENV,capture_output=True,text=True,timeout=timeout)
+
+def commit_epoch(inst):
+    """Committer timestamp of the task's base_commit (exact build-proximity key). Falls back to
+    the dataset's fix/created timestamps if the commit isn't resolvable in the source clone."""
+    r=git(config.SRC,"show","-s","--format=%ct",inst["base_commit"],timeout=60)
+    if r.returncode==0 and r.stdout.strip().isdigit(): return int(r.stdout.strip())
+    from datetime import datetime
+    for k in ("fix_commit_at","created_at","issue_created_at"):
+        v=inst.get(k)
+        if v:
+            try: return int(datetime.fromisoformat(v.replace("Z","+00:00")).timestamp())
+            except Exception: pass
+    return 0
 def record(r):
     with open(SOLVE_RESULTS,"a") as f: f.write(json.dumps(r)+"\n")
 def claim(iid):
     try: os.mkdir(os.path.join(SCLAIMS,iid)); return True
     except FileExistsError: return False
-def done_ids():
+def done_pairs():
+    """Set of '<instance_id>|<backend>' rows already graded (so we can resume/skip)."""
     s=set()
     if os.path.exists(SOLVE_RESULTS):
         for l in open(SOLVE_RESULTS):
-            try: s.add(json.loads(l)["instance_id"])
+            try:
+                r=json.loads(l); s.add(f"{r['instance_id']}|{r.get('backend','?')}")
             except: pass
     return s
 
@@ -120,15 +140,15 @@ def _restore_history(wt):
     shutil.rmtree(gd,ignore_errors=True)   # drop the minimal repo
     os.rename(bak,gd)                        # restore real history for grading / next task
 
-def solve(wid,wt,env,outdir,inst):
-    # blind reset
+def solve(wid,wt,env,inst,backend_name):
+    # blind reset to base for this backend's attempt
     git(wt,"checkout","-q","-f",inst["base_commit"]); git(wt,"clean","-qfd","test/","torch/","tools/")
     pf=os.path.join(wt,"PROBLEM.txt")
     with open(pf,"w") as f: f.write(inst["problem_statement"])
     assert os.path.getsize(pf)>0, "empty problem_statement"
     prompt=SOLVE_PROMPT.format(env=env)
-    trace_path=os.path.join(TRACES,f"{inst['instance_id']}.trace.jsonl")
-    backend_fn=backends.get_backend(BACKEND)
+    trace_path=os.path.join(TRACES,f"{inst['instance_id']}__{backend_name}.trace.jsonl")
+    backend_fn=backends.get_backend(backend_name)
     _strip_history(wt)   # hide the future fix commit from the solver (backend-agnostic)
     try:
         # backend runs the agent in wt (blind), edits files, writes its trace, returns meta
@@ -137,8 +157,10 @@ def solve(wid,wt,env,outdir,inst):
         _restore_history(wt)   # bring back real .git (HEAD detached at base_commit) for grading
     os.remove(pf)
     git(wt,"add","-N",".")
-    d=git(wt,"diff","--","." ,":(exclude)test/*",":(exclude)PROBLEM.txt",":(exclude)agent_space/*")
+    d=git(wt,"diff","--","." ,":(exclude)test/*",":(exclude)PROBLEM.txt",
+          ":(exclude)agent_space/*",":(exclude).tbh_prompt.txt")
     git(wt,"reset","-q")
+    meta.setdefault("has_trace", os.path.exists(trace_path))
     return d.stdout, meta
 
 def grade(wt,env,inst,model_patch):
@@ -168,63 +190,95 @@ def grade(wt,env,inst,model_patch):
     return {"resolved":bool(f2p_ok and p2p_ok),"f2p_pass":sum(post.get(t)=="PASSED" for t in f2p),
             "f2p_total":len(f2p),"p2p_ok":p2p_ok}
 
-def worker(wid,tasks,jobs):
-    try: wt,env=ensure(wid); log(wid,f"ready {wt}")
+def worker(wid,tasks,jobs,backends_todo):
+    try: wt,env=ensure(wid); log(wid,f"ready {wt}  backends={backends_todo}")
     except Exception as e: log(wid,f"FATAL {e}"); return
+    dp=done_pairs()
     for inst in tasks:
         iid=inst["instance_id"]
-        if not claim(iid): continue
+        pending=[b for b in backends_todo if f"{iid}|{b}" not in dp]
+        if not pending: continue
+        if not claim(iid): continue               # one worker owns the build + all backends for this task
         try:
-            t0=time.monotonic()
+            # ---- build the env ONCE, then fan out across backends ----
             git(wt,"checkout","-q","-f",inst["base_commit"])
             git(wt,"submodule","update","--init","--recursive",timeout=1800)
             tb=time.monotonic()
             ok=build(wt,env,jobs); t_build=round(time.monotonic()-tb,1)
             if not ok:
-                record({"instance_id":iid,"resolved":False,"reason":"build_failed","t_build_s":t_build}); log(wid,f"{iid} build_failed ({t_build}s)"); continue
-            ts=time.monotonic()
-            mp,meta=solve(wid,wt,env,None,inst); t_solve=round(time.monotonic()-ts,1)
-            tg=time.monotonic()
-            g=grade(wt,env,inst,mp); t_grade=round(time.monotonic()-tg,1)
-            g.update(instance_id=iid,patch_bytes=len(mp),
-                     t_build_s=t_build,t_solve_s=t_solve,t_grade_s=t_grade,
-                     t_e2e_s=round(time.monotonic()-t0,1),**meta)   # meta carries backend+model
-            record(g)
-            n=sum(1 for l in open(SOLVE_RESULTS) if json.loads(l).get("resolved"))
-            log(wid,f"{iid} resolved={g['resolved']} ({g.get('f2p_pass')}/{g.get('f2p_total')} F2P) "
-                    f"build={t_build}s solve={t_solve}s cost=${meta.get('cost_usd')} [total resolved={n}]")
+                for b in pending:
+                    record({"instance_id":iid,"backend":b,"resolved":False,"reason":"build_failed","t_build_s":t_build})
+                log(wid,f"{iid} build_failed ({t_build}s) -> {len(pending)} backends skipped"); continue
+            log(wid,f"{iid} built in {t_build}s; dispatching {pending}")
+            for b in pending:
+                try:
+                    t0=time.monotonic(); ts=time.monotonic()
+                    mp,meta=solve(wid,wt,env,inst,b); t_solve=round(time.monotonic()-ts,1)
+                    tg=time.monotonic()
+                    g=grade(wt,env,inst,mp); t_grade=round(time.monotonic()-tg,1)
+                    g.update(instance_id=iid,patch_bytes=len(mp),
+                             t_build_s=t_build,t_solve_s=t_solve,t_grade_s=t_grade,
+                             t_e2e_s=round(time.monotonic()-t0,1),**meta)   # meta carries backend+model
+                    record(g)
+                    log(wid,f"{iid} [{b}] resolved={g['resolved']} ({g.get('f2p_pass')}/{g.get('f2p_total')} F2P) "
+                            f"solve={t_solve}s cost=${meta.get('cost_usd')} trace={meta.get('has_trace')}")
+                except Exception as e:
+                    record({"instance_id":iid,"backend":b,"resolved":False,"t_build_s":t_build,
+                            "reason":f"exc:{type(e).__name__}:{str(e)[:120]}"}); log(wid,f"{iid} [{b}] EXC {e}")
         except Exception as e:
-            record({"instance_id":iid,"resolved":False,"reason":f"exc:{type(e).__name__}:{str(e)[:120]}"}); log(wid,f"{iid} EXC {e}")
+            for b in pending:
+                record({"instance_id":iid,"backend":b,"resolved":False,"reason":f"task_exc:{type(e).__name__}:{str(e)[:120]}"})
+            log(wid,f"{iid} TASK EXC {e}")
 
-def main(nworkers=4, limit=None):
-    backends.get_backend(BACKEND)   # validate early
-    print(f"== backend: {BACKEND}  |  available: {sorted(backends.REGISTRY)} ==",flush=True)
+def task_done(iid,dp):
+    return all(f"{iid}|{b}" in dp for b in BACKENDS)
+
+def main(nworkers=4, limit=None, only_ids=None):
+    for b in BACKENDS: backends.get_backend(b)   # validate all early
+    print(f"== backends: {BACKENDS}  |  available: {sorted(backends.REGISTRY)} ==",flush=True)
     tasks=[json.loads(l) for l in open(DATASET) if l.strip()]
-    # need F2P from inst/<id>/instance.json (dataset has it too)
     tasks=[t for t in tasks if t.get("FAIL_TO_PASS")]
-    done=done_ids()
-    # clear stale claims (claimed but no result) so interrupted tasks get reprocessed
+    if only_ids: tasks=[t for t in tasks if t["instance_id"] in only_ids]
+    dp=done_pairs()
+    # clear stale claims for tasks that aren't fully done across all backends (resume-safe)
     for c in os.listdir(SCLAIMS):
-        if c not in done: shutil.rmtree(os.path.join(SCLAIMS,c),ignore_errors=True)
-    tasks=[t for t in tasks if t["instance_id"] not in done]
+        if not task_done(c,dp): shutil.rmtree(os.path.join(SCLAIMS,c),ignore_errors=True)
+    tasks=[t for t in tasks if not task_done(t["instance_id"],dp)]
+    # Order by base_commit time and split into CONTIGUOUS time windows (one per worker), so each
+    # worker walks a tight span of history -> adjacent checkouts need only cheap incremental builds
+    # (round-robin would make every worker jump across all of history, near-cold every time).
+    tasks.sort(key=commit_epoch)
     if limit: tasks=tasks[:limit]
+    print(f"== {len(tasks)} tasks x {len(BACKENDS)} backends to run ==",flush=True)
     jobs=min(40,max(8,360//nworkers))
-    shards=[tasks[i::nworkers] for i in range(nworkers)]
-    procs=[mp.Process(target=worker,args=(i,shards[i],jobs)) for i in range(nworkers)]
+    chunk=(len(tasks)+nworkers-1)//nworkers if tasks else 0
+    shards=[tasks[k*chunk:(k+1)*chunk] for k in range(nworkers)]
+    from datetime import datetime,timezone
+    for i,s in enumerate(shards):
+        if s:
+            lo=datetime.fromtimestamp(commit_epoch(s[0]),timezone.utc).date()
+            hi=datetime.fromtimestamp(commit_epoch(s[-1]),timezone.utc).date()
+            print(f"   worker {i}: {len(s)} tasks, commit window {lo}..{hi}",flush=True)
+    procs=[mp.Process(target=worker,args=(i,shards[i],jobs,BACKENDS)) for i in range(nworkers)]
     for p in procs: p.start(); time.sleep(15)
     while any(p.is_alive() for p in procs):
         time.sleep(60)
         if os.path.exists(SOLVE_RESULTS):
             r=[json.loads(l) for l in open(SOLVE_RESULTS)]
-            print(f"== solved {sum(x.get('resolved') for x in r)} / graded {len(r)} ==",flush=True)
+            byb={}
+            for x in r: byb.setdefault(x.get("backend","?"),[0,0]); byb[x.get("backend","?")][0]+=1; byb[x.get("backend","?")][1]+=bool(x.get("resolved"))
+            print("== "+" | ".join(f"{b}:{s}/{n}" for b,(n,s) in sorted(byb.items()))+" ==",flush=True)
     for p in procs: p.join()
     print("DONE")
 
 if __name__=="__main__":
-    # usage: solve.py [nworkers] [limit] [--backend=NAME]   (or PTAB_BACKEND env)
+    # usage: solve.py [nworkers] [limit] [--backends=a,b,c] [--ids=id1,id2]  (or PTAB_BACKENDS env)
     pos=[a for a in sys.argv[1:] if not a.startswith("--")]
+    only=None
     for a in sys.argv[1:]:
-        if a.startswith("--backend="): BACKEND=a.split("=",1)[1]
+        if a.startswith("--backends="): BACKENDS=[b for b in a.split("=",1)[1].split(",") if b]
+        elif a.startswith("--backend="): BACKENDS=[a.split("=",1)[1]]
+        elif a.startswith("--ids="): only=set(x for x in a.split("=",1)[1].split(",") if x)
     nw=int(pos[0]) if len(pos)>0 else 4
     lim=int(pos[1]) if len(pos)>1 else None
-    main(nw,lim)
+    main(nw,lim,only)

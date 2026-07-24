@@ -86,7 +86,7 @@ pull request")` + `WebFetch` of the reference source — it looked up the answer
 - Solver sees only `problem_statement` (via PROBLEM.txt) + the repo at `base_commit`.
 - The gold `patch`, `test_patch`, and F2P/P2P ids are NEVER in the worktree or prompt.
 - The added test is absent at `base_commit` (it arrives only via `test_patch` at grade time),
-  so the solver can't read the grader. Forbid it from reading other `ptbench/` dirs.
+  so the solver can't read the grader. Forbid it from reading other answer-key/workspace dirs.
 - Forbid editing `test/`; strip any test-file hunks from the captured patch anyway.
 
 ## 3. Capturing the model patch
@@ -115,7 +115,7 @@ git via `env -u LD_LIBRARY_PATH`.
 ## 6. Gotchas specific to solve+grade (all hit & fixed)
 | Symptom | Fix |
 |---|---|
-| **Every solve returns empty patch (`patch_bytes=0`), claude rc=1** | `claude` is fbcode-linked — it crashes with `GLIBC_2.35 not found` if `/usr/lib64` is on `LD_LIBRARY_PATH`. Run `claude` with a **clean env** (no `LD_LIBRARY_PATH`); the solver adds it itself when running python. |
+| **Every solve returns empty patch (`patch_bytes=0`), claude rc=1** | the `claude` CLI is linked against a custom libc — it crashes with `GLIBC_2.35 not found` if `/usr/lib64` is on `LD_LIBRARY_PATH`. Run `claude` with a **clean env** (no `LD_LIBRARY_PATH`); the solver adds it itself when running python. |
 | claude "no stdin data received", flaky | pass `stdin=subprocess.DEVNULL` to the claude subprocess |
 | PROBLEM.txt empty → solver asks for the bug | assert `os.path.getsize(PROBLEM.txt) > 0` before running the solver |
 | model_patch "patch did not apply" (new file) | remove patch-created files before `git apply` (grade does this) |
@@ -131,7 +131,7 @@ nohup python3 solve_and_grade.py 4 > solve.log 2>&1 & disown      # all tasks, 4
   `solve_claims/` (claimed, no result) before a restart.
 - Monitor: `grep -c '"resolved": true' solve_results.jsonl`; per-worker `solve_logs/s<i>.log`;
   per-task solver transcript `solve_logs/<id>.claude.log`.
-- **Always validate on a small `limit` batch first** — it caught the fbcode-loader bug before
+- **Always validate on a small `limit` batch first** — it caught the libc-loader bug before
   wasting 102 builds.
 
 ## 8. Pass-rate assembly

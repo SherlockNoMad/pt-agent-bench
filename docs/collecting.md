@@ -85,7 +85,7 @@ commit *is* patch+test_patch; its **parent is `base_commit`**. `collect_one.py` 
 
 ## 4. Environment recipe (per worker) — VALIDATED, all fixes included
 
-- **Conda python 3.11** (NOT the system `+meta` python — its fbcode loader breaks native libs:
+- **Conda python 3.11** (NOT the system python — its custom loader can break native libs:
   `GLIBC_2.35 not found`).
 - Deps: `cmake==3.31.6 ninja pyyaml typing_extensions numpy setuptools wheel requests
   expecttest hypothesis` + `pip install -r requirements.txt`, and **`pytest==7.4.4`** (see below).
@@ -113,7 +113,7 @@ commit *is* patch+test_patch; its **parent is `base_commit`**. `collect_one.py` 
   most "build_failed" into successes. (Diagnosing: the harness only saved the last ~3 KB of
   build output — the real error is often above that; do a full-log build to see it.)
 - **Runtime**: `export LD_LIBRARY_PATH=/usr/lib64:<env>/lib` (for `libgomp.so.1`) — python/pytest ONLY.
-- **CRITICAL git rule**: run every `git` with `env -u LD_LIBRARY_PATH` (host git is fbcode-linked
+- **CRITICAL git rule**: run every `git` with `env -u LD_LIBRARY_PATH` (host git is linked against a custom libc
   and crashes when `/usr/lib64` is on the path). Python WITH the path, git WITHOUT it.
 
 ---
@@ -143,7 +143,7 @@ commit *is* patch+test_patch; its **parent is `base_commit`**. `collect_one.py` 
 Reset tree to `base_commit` clean: `git checkout -f base; git clean -fd test/ torch/ tools/`
 (**NEVER a bare `git clean -fd`** — it deletes `build/`). Spawn a solver subagent restricted to
 that worker's copy, given ONLY the `problem_statement`, forbidden from reading any other
-`ptbench/` dir (answer keys) or editing `test/`. Capture its patch: `git add -N` then
+answer-key dir (`problems/instances/`) or editing `test/`. Capture its patch: `git add -N` then
 `git diff -- . ':(exclude)test/*'` (`add -N` makes NEW files appear). Write
 `{instance_id, model_name_or_path, model_patch}` to a predictions jsonl.
 Expect ~67% solve rate on a blind single-shot agent; partial solves on multi-F2P tasks are
@@ -174,7 +174,7 @@ fix can score 0 on a message typo — observed on `#187861` (blind agent wrote a
 | `libtorchbind_test.so: cannot open` | `BUILD_TEST=1` + `rm build/CMakeCache.txt` to reconfigure |
 | `git submodule ... could not get a repository handle` | don't use worktrees; `rsync -a --exclude /build/ src/ wt<i>/` |
 | `gen.py: unrecognized arguments --headeronly-install-dir` / `ninja build stopped` no error | stale build dir across commit jump → `rm -rf build` and rebuild (clean-retry) |
-| `GLIBC_2.35 not found` on import/git | conda python (not `+meta`); git via `env -u LD_LIBRARY_PATH` |
+| `GLIBC_2.35 not found` on import/git | conda python (not the system python); git via `env -u LD_LIBRARY_PATH` |
 | `libgomp.so.1: cannot open` | `LD_LIBRARY_PATH=/usr/lib64:<env>/lib` for python only |
 | cmake rejects old `cmake_minimum_required` | `CMAKE_POLICY_VERSION_MINIMUM=3.5` |
 | model_patch "patch did not apply" (new file) | grader deletes patch-created files first (grade.py does) |

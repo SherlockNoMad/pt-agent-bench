@@ -11,8 +11,10 @@ PROBLEMS   = os.path.join(REPO, "problems")
 INSTANCES  = os.path.join(PROBLEMS, "instances")            # per-task instance.json + patches/
 DATASET    = os.path.join(PROBLEMS, "pt-agent-bench.jsonl") # the benchmark (one task per line)
 RESULTS    = os.path.join(REPO, "results")
-TRACES     = os.path.join(RESULTS, "traces")                # full solver tool-call transcripts
-SOLVE_RESULTS = os.path.join(RESULTS, "solve_results.jsonl")
+# TRACES / SOLVE_RESULTS are env-overridable so a scratch/dry run can be isolated from the
+# committed corpus results (e.g. PTAB_TRACES / PTAB_SOLVE_RESULTS pointing at results/dryrun/).
+TRACES     = os.environ.get("PTAB_TRACES", os.path.join(RESULTS, "traces"))  # solver transcripts
+SOLVE_RESULTS = os.environ.get("PTAB_SOLVE_RESULTS", os.path.join(RESULTS, "solve_results.jsonl"))
 
 # --- workspace (gitignored, rebuildable; see setup_workspace.sh) ---
 WORKSPACE  = os.environ.get("PTAB_WORKSPACE", os.path.join(REPO, "workspace"))
@@ -28,7 +30,7 @@ SEEN_ISSUES = os.path.join(WORKSPACE, "seen_issues.txt")
 COLLECT_RESULTS = os.path.join(WORKSPACE, "collect_results.jsonl")
 COLLECT_CLAIMS  = os.path.join(WORKSPACE, "collect_claims")
 # solve runtime state
-SOLVE_CLAIMS = os.path.join(WORKSPACE, "solve_claims")
+SOLVE_CLAIMS = os.environ.get("PTAB_SOLVE_CLAIMS", os.path.join(WORKSPACE, "solve_claims"))
 
 # --- external tools (overridable) ---
 GH     = os.environ.get("PTAB_GH_BIN", "gh")

@@ -41,7 +41,7 @@ def audit(f):
                 if re.search(pat,cmd,re.I): flags.append(f"BASH~{pat}: {cmd[:140]}")
         if name=="Read":
             p=inp.get("file_path","")
-            if "/inst/" in p or p.rstrip("/").endswith(("test_patch.diff","gold_patch.diff")) or "/ptbench/pytorch__pytorch-" in p:
+            if "/inst/" in p or p.rstrip("/").endswith(("test_patch.diff","gold_patch.diff")) or "/instances/pytorch__pytorch-" in p:
                 flags.append(f"READ:{p}")
     return flags
 

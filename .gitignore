@@ -17,5 +17,16 @@ __pycache__/
 # solver transcripts may contain local paths — not published
 /results/traces/
 
+# per-run output dirs (traces, exports, run.sh with local workspace paths) — not published
+/results/dryrun/
+/results/multi/
+/results/skills_canary/
+/results/skills_canary_claude/
+/results/skills_study/
+
 # Private/local solver backends overlay — not published
 /solver/backends_internal.py
+
+# Offline browser (generator + generated html) — references internal backends/hosts; not published
+/problems/explorer.html
+/problems/explorer.py

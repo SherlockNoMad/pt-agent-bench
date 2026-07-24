@@ -20,6 +20,15 @@ Docs: `docs/design.md`, `docs/collecting.md`, `docs/solving.md`, `results/solve_
 - [ ] Rebuild + smoke-test the fresh `workspace/` (via `setup_workspace.sh`) end-to-end on 1 task.
 
 ## 🧪 Open — benchmark rigor
+- [ ] **Persist exact agent patch text** (⏳ *after the in-flight solve run finishes* — don't edit
+      `solve.py` or trigger a re-run mid-flight). `solve.py` computes `mp` (`git diff`) but stores only
+      `patch_bytes=len(mp)`; the text is discarded and worktrees are `git clean`ed per task, so it's
+      unrecoverable. Write `mp` to `results/multi/patches/<iid>__<backend>.patch` (mirror `traces/`),
+      then have the explorer "vs gold" tab load it → byte-exact instead of trace-reconstructed.
+      NOTE: only helps *future* runs; re-running re-invokes agents → different patches.
+- [ ] Explorer "vs gold" compare tab currently *reconstructs* the agent patch from traces (some
+      backends persist full edit content; others only file+line counts, no hunk text). Once patches
+      are persisted, switch the agent column to the stored patch and drop the "not byte-exact" caveat.
 - [ ] Multiple attempts / pass@k + a second model (e.g. sonnet) for a comparable number, not a snapshot.
 - [ ] Egress allowlist (only the model-API host) so Bash `curl`/`wget` also fail — fully airtight network.
 - [ ] Per-instance difficulty tiering; down-rank message-string-pinned F2P tests (see collector §8a).
@@ -32,6 +41,6 @@ Docs: `docs/design.md`, `docs/collecting.md`, `docs/solving.md`, `results/solve_
 - [ ] Overnight collection at larger scale (deeper discovery; the pipeline is resumable).
 
 ## ⚠️ Known gotchas (encoded in the runbooks — don't re-derive)
-- Use conda python (not the `+meta` fbcode python); run `git` with `env -u LD_LIBRARY_PATH`.
+- Use a clean conda python (the system python's custom loader can break the build's native libs); if the host `git`/CLIs are linked against a custom libc, run them without the build `LD_LIBRARY_PATH`.
 - Build: `BUILD_TEST=1`, NOT `USE_KINETO=0`, `pytest==7.4.4`, clean-rebuild-retry, `MAX_JOBS` cap.
 - Solver reward-hacks git history — the airtight object-strip (real `.git` moved outside worktree) is required.

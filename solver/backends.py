@@ -27,6 +27,54 @@ def get_backend(name):
         raise SystemExit(f"unknown backend '{name}'. available: {sorted(REGISTRY)}")
     return REGISTRY[name]
 
+def scan_usage(text):
+    """Best-effort cost/token/turn extraction from a JSONL event stream. Backends use different
+    schemas: codex exposes usage.{input,output}_tokens; others use a nested tokens.{input,output}
+    (+ cost) shape, or an event-sourced log that omits token fields entirely. We recursively
+    harvest whichever fields exist. Tokens are taken as the running max (streams report
+    cumulative/context totals); cost as the last numeric seen. The harness wall-clock and the
+    grader's pass/fail are the authoritative metrics — this is only metadata, so None is fine."""
+    intok = outtok = cache = reason = turns = 0
+    cost = None
+    COMPLETE = ("turn.completed", "response.completed", "message.completed", "step.completed",
+                "assistant", "run.model.completed", "run.terminal.completed")
+    def mx(cur, *vals):
+        for v in vals:
+            if isinstance(v, (int, float)): cur = max(cur, v)
+        return cur
+    for line in text.splitlines():
+        line = line.strip()
+        if line[:1] != "{": continue
+        try: ev = json.loads(line)
+        except Exception: continue
+        marker = str(ev.get("type") or ev.get("payload_type") or "") if isinstance(ev, dict) else ""
+        if any(m in marker for m in COMPLETE): turns += 1
+        stack = [ev]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, dict):
+                tk = o.get("tokens")                                   # nested tokens.{input,output}
+                if isinstance(tk, dict):
+                    intok = mx(intok, tk.get("input")); outtok = mx(outtok, tk.get("output"))
+                us = o.get("usage")                                    # codex/anthropic style
+                if isinstance(us, dict):
+                    intok  = mx(intok,  us.get("input_tokens"), us.get("prompt_tokens"))
+                    outtok = mx(outtok, us.get("output_tokens"), us.get("completion_tokens"))
+                    cache  = mx(cache,  us.get("cached_input_tokens"), us.get("cache_read_input_tokens"))
+                    reason = mx(reason, us.get("reasoning_output_tokens"), us.get("reasoning_tokens"))
+                intok  = mx(intok,  o.get("input_tokens"),  o.get("prompt_tokens"))    # inline fields
+                outtok = mx(outtok, o.get("output_tokens"), o.get("completion_tokens"))
+                cache  = mx(cache,  o.get("cached_input_tokens"), o.get("cache_read_input_tokens"))
+                reason = mx(reason, o.get("reasoning_output_tokens"), o.get("reasoning_tokens"))
+                for ck in ("total_cost_usd", "cost_usd", "cost"):
+                    if isinstance(o.get(ck), (int, float)): cost = o[ck]
+                stack.extend(o.values())
+            elif isinstance(o, list):
+                stack.extend(o)
+    return {"in_tok": intok or None, "out_tok": outtok or None,
+            "cache_tok": cache or None, "reasoning_tok": reason or None,
+            "num_turns": turns or None, "cost_usd": cost}
+
 # ---------------- Claude Code ----------------
 @register("claude-code")
 def claude_code(wt, env, prompt, timeout, trace_path):
@@ -52,9 +100,12 @@ def claude_code(wt, env, prompt, timeout, trace_path):
                     cache_create_tok=u.get("cache_creation_input_tokens"),
                     is_error=j.get("is_error"), stop_reason=j.get("stop_reason"), session_id=sid)
         if sid and trace_path:
-            proj = os.path.expanduser("~/.claude/projects/" + os.path.abspath(wt).replace("/", "-"))
-            src = os.path.join(proj, f"{sid}.jsonl")
-            if os.path.exists(src): shutil.copy(src, trace_path)
+            # Claude Code keys its project dir by the RESOLVED cwd, so try realpath first
+            # (wt may be a symlink) then fall back to the literal abspath.
+            for base in (os.path.realpath(wt), os.path.abspath(wt)):
+                src = os.path.join(os.path.expanduser("~/.claude/projects/" + base.replace("/", "-")),
+                                   f"{sid}.jsonl")
+                if os.path.exists(src): shutil.copy(src, trace_path); break
     except subprocess.TimeoutExpired:
         meta.update(is_error=True, timeout=True)
     except Exception as e:
@@ -78,18 +129,7 @@ def codex(wt, env, prompt, timeout, trace_path):
                            capture_output=True, text=True, timeout=timeout)
         if trace_path:
             open(trace_path, "w").write(r.stdout)
-        # best-effort usage/cost from the JSONL event stream
-        intok = outtok = turns = 0; cost = None; err = r.returncode != 0
-        for line in r.stdout.splitlines():
-            try: ev = json.loads(line)
-            except Exception: continue
-            u = ev.get("usage") or (ev.get("info") or {}).get("usage") or {}
-            if u:
-                intok = u.get("input_tokens", intok); outtok = u.get("output_tokens", outtok)
-            if isinstance(ev.get("total_cost_usd"), (int, float)): cost = ev["total_cost_usd"]
-            if ev.get("type") in ("turn.completed", "response.completed"): turns += 1
-        meta.update(cost_usd=cost, in_tok=intok or None, out_tok=outtok or None,
-                    num_turns=turns or None, is_error=err)
+        meta.update(is_error=r.returncode != 0, **scan_usage(r.stdout))
     except subprocess.TimeoutExpired:
         meta.update(is_error=True, timeout=True)
     except Exception as e:

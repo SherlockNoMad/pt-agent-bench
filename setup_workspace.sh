@@ -35,4 +35,4 @@ export PATH="$ENV/bin:$PATH" LD_LIBRARY_PATH="/usr/lib64:$ENV/lib"
 ( cd "$SRC" && "$ENV/bin/python" setup.py develop )
 
 echo "== done. Runtime notes: python needs LD_LIBRARY_PATH=/usr/lib64:$ENV/lib ;"
-echo "   run git WITHOUT that LD_LIBRARY_PATH (host git is fbcode-linked). =="
+echo "   run git WITHOUT that LD_LIBRARY_PATH (host git may be linked against a custom libc). =="
